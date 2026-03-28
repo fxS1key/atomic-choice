@@ -1,0 +1,595 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Atomic Choice</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<header>
+  <div class="logo" onclick="nav('home')">
+    <img src="/static/logo.png" alt="Atomic Choice" class="logo-img">
+    ATOMIC CHOICE
+  </div>
+  <nav>
+    <button class="nb on" id="n-home" onclick="nav('home')">Главная</button>
+    <button class="nb" id="n-polls" onclick="nav('polls')">Голосования</button>
+    <button class="nb" id="n-admin" onclick="nav('admin')">Панель</button>
+  </nav>
+  <div class="hd-right">
+    <span class="chain-tag" id="chain-tag">Hardhat :8545</span>
+    <button class="wallet-btn" id="wallet-btn" onclick="openWallet()">
+      <span class="wdot off" id="wdot"></span>
+      <span id="wallet-label">Войти</span>
+    </button>
+  </div>
+</header>
+
+<main id="root"></main>
+
+<!-- Connect Modal -->
+<div id="modal" class="overlay" style="display:none" onclick="if(event.target===this)closeModal()">
+  <div class="modal">
+    <div class="modal-title">🎓 Выберите аккаунт</div>
+    <div class="modal-sub">Выберите студента из вайтлиста. В реальной системе — это ваш MetaMask + ZK identity.</div>
+    <div class="wlist" id="wlist"></div>
+    <button class="wl-close" onclick="closeModal()">Отмена</button>
+  </div>
+</div>
+
+<div id="toasts"></div>
+
+<script>
+'use strict';
+// ─── State ───────────────────────────────────────────────────────────────────
+let page = 'home', pollAddr = null, selOpt = null;
+let wallet = null, student = null;
+let filter = 'all';
+let txLog = [];
+
+// ─── Utils ────────────────────────────────────────────────────────────────────
+const $ = id => document.getElementById(id);
+const ROOT = () => $('root');
+
+async function api(method, path, body) {
+  const opts = { method, headers: {'Content-Type':'application/json'} };
+  if (body) opts.body = JSON.stringify(body);
+  try {
+    const r = await fetch(path, opts);
+    return r.json();
+  } catch(e) {
+    return { error: e.message };
+  }
+}
+
+function toast(msg, type='info') {
+  const d = document.createElement('div');
+  d.className = 'toast ' + type;
+  d.textContent = msg;
+  $('toasts').appendChild(d);
+  setTimeout(() => d.style.opacity = '0', 2800);
+  setTimeout(() => d.remove(), 3100);
+}
+
+function fmtTime(unix) {
+  return new Date(unix * 1000).toLocaleString('ru',
+    {day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'});
+}
+function timeLeft(unix) {
+  const s = unix - Date.now()/1000;
+  if (s <= 0) return '';
+  const h = Math.floor(s/3600), m = Math.floor((s%3600)/60);
+  if (h > 48) return Math.floor(h/24) + ' дн.';
+  if (h > 0) return `${h}ч ${m}м`;
+  if (m > 0) return m + ' мин';
+  return Math.floor(s) + ' сек';
+}
+function badge(status) {
+  const map = {
+    active:   ['b-active','● ACTIVE'],
+    ended:    ['b-ended', '■ ENDED'],
+    upcoming: ['b-upcoming','◆ SOON'],
+  };
+  const [cls,lbl] = map[status]||['b-ended','—'];
+  return `<span class="badge ${cls}">${lbl}</span>`;
+}
+const LABELS = ['А','Б','В','Г','Д','Е','Ж','З','И','К','Л','М','Н','О','П','Р'];
+
+// ─── Router ───────────────────────────────────────────────────────────────────
+function nav(p, addr) {
+  page = p; pollAddr = addr || null; selOpt = null;
+  ['home','polls','admin'].forEach(x => $('n-'+x)?.classList.toggle('on', x===p || (p==='poll'&&x==='polls')));
+  render();
+  window.scrollTo(0,0);
+}
+
+// ─── Wallet ───────────────────────────────────────────────────────────────────
+async function openWallet() {
+  if (wallet) {
+    wallet = null; student = null;
+    updateWalletUI();
+    toast('Выход выполнен','info');
+    render(); return;
+  }
+  const data = await api('GET', '/api/students');
+  const students = Array.isArray(data) ? data : [];
+  const list = $('wlist');
+  list.innerHTML = '';
+  students.forEach(s => {
+    const b = document.createElement('button');
+    b.className = 'wo';
+    b.innerHTML = `
+      <div class="wa">🎓</div>
+      <div>
+        <div class="wname">${s.name}</div>
+        <div class="waddr">${s.wallet.slice(0,8)}…${s.wallet.slice(-6)}</div>
+        <div class="wgrp">${s.group} · ${s.whitelisted ? '✓ whitelisted' : '⏳ not whitelisted'}</div>
+      </div>`;
+    b.onclick = () => connectAs(s);
+    list.appendChild(b);
+  });
+  $('modal').style.display = 'flex';
+}
+function closeModal() { $('modal').style.display = 'none'; }
+
+function connectAs(s) {
+  closeModal();
+  wallet = s.wallet; student = s;
+  updateWalletUI();
+  toast(`✓ ${s.name}`, 'ok');
+  render();
+}
+
+function updateWalletUI() {
+  const dot = $('wdot'), lbl = $('wallet-label'), btn = $('wallet-btn');
+  if (wallet) {
+    dot.className = 'wdot on';
+    lbl.textContent = student.name.split(' ')[0];
+    btn.classList.add('active');
+  } else {
+    dot.className = 'wdot off';
+    lbl.textContent = 'Войти';
+    btn.classList.remove('active');
+  }
+}
+
+// ─── Node status ──────────────────────────────────────────────────────────────
+async function checkStatus() {
+  const s = await api('GET', '/api/admin/status');
+  const tag = $('chain-tag');
+  if (s.node_connected) {
+    tag.textContent = 'Hardhat ✓';
+    tag.classList.add('ok');
+  } else {
+    tag.textContent = 'No node';
+    tag.classList.remove('ok');
+  }
+  return s;
+}
+
+// ─── Render ───────────────────────────────────────────────────────────────────
+async function render() {
+  if (page === 'home')  return renderHome();
+  if (page === 'polls') return renderPolls();
+  if (page === 'poll')  return renderPoll();
+  if (page === 'admin') return renderAdmin();
+}
+
+// HOME -------------------------------------------------------------------------
+async function renderHome() {
+  const status = await checkStatus();
+  const pd = await api('GET', '/api/polls');
+  const polls = pd.polls || [];
+  const active = polls.filter(p => p.status === 'active');
+
+  ROOT().innerHTML = `<div class="page">
+    <div class="stats">
+      <div class="sc">
+        <div class="sc-label">Node</div>
+        <div class="sc-val" style="font-size:1.1rem;color:${status.node_connected?'var(--green)':'var(--red)'}">
+          ${status.node_connected ? 'online' : 'offline'}
+        </div>
+        <div class="sc-sub">chain ${status.deployments?.chain_id||'—'}</div>
+      </div>
+      <div class="sc">
+        <div class="sc-label">Голосований</div>
+        <div class="sc-val">${polls.length}</div>
+        <div class="sc-sub">${active.length} активных</div>
+      </div>
+      <div class="sc">
+        <div class="sc-label">Голосов on-chain</div>
+        <div class="sc-val">${polls.reduce((a,p)=>a+p.total_votes,0)}</div>
+        <div class="sc-sub">через ZK proofs</div>
+      </div>
+      <div class="sc">
+        <div class="sc-label">Студентов</div>
+        <div class="sc-val">${status.students_whitelisted}/${status.students_total}</div>
+        <div class="sc-sub">в вайтлисте</div>
+      </div>
+    </div>
+
+    ${!status.node_connected ? `
+      <div class="ib warn" style="margin-bottom:1.5rem">
+        ⚠ Hardhat нода не запущена.<br>
+        <span style="font-family:var(--mono);font-size:.8rem">cd contracts && npx hardhat node</span>
+      </div>` : !status.contracts_deployed ? `
+      <div class="ib info" style="margin-bottom:1.5rem">
+        Контракты не задеплоены. Перейдите в <strong>Панель</strong> и нажмите <strong>Быстрый старт</strong>.
+      </div>` : ''}
+
+    ${active.length ? `
+    <div class="sh"><div class="sh-title">Активные голосования</div></div>
+    <div class="pgrid">${active.map(pollCard).join('')}</div>` : ''}
+
+    ${txLog.length ? `
+    <div class="sh" style="margin-top:2rem"><div class="sh-title">Последние транзакции</div><span class="sh-tag">on-chain</span></div>
+    <div class="admin-card">
+      ${txLog.slice(-5).reverse().map(t=>`
+        <div class="log-entry">
+          <div class="le-action">${t.action}</div>
+          <div class="le-hash">${t.hash}</div>
+          <div class="le-time">block ${t.block}</div>
+        </div>`).join('')}
+    </div>` : ''}
+  </div>`;
+
+  ROOT().querySelectorAll('.pc').forEach(c =>
+    c.addEventListener('click', () => nav('poll', c.dataset.addr)));
+}
+
+// POLLS ------------------------------------------------------------------------
+async function renderPolls() {
+  const pd = await api('GET', '/api/polls');
+  const polls = pd.polls || [];
+  const filtered = filter === 'all' ? polls : polls.filter(p => p.status === filter);
+  const counts = {all:polls.length, active:0, upcoming:0, ended:0};
+  polls.forEach(p => counts[p.status] = (counts[p.status]||0) + 1);
+
+  ROOT().innerHTML = `<div class="page">
+    <div class="sh"><div class="sh-title">Все голосования</div></div>
+    <div class="filters">
+      ${['all','active','upcoming','ended'].map(f =>
+        `<button class="fb ${filter===f?'on':''}" onclick="setFilter('${f}')">${
+          {all:'Все',active:'Активные',upcoming:'Скоро',ended:'Завершены'}[f]
+        } ${counts[f]||0}</button>`
+      ).join('')}
+    </div>
+    ${filtered.length
+      ? `<div class="pgrid">${filtered.map(pollCard).join('')}</div>`
+      : `<div class="empty"><div class="empty-ico">🗳</div><h3>Нет голосований</h3><p>В этой категории пусто</p></div>`}
+  </div>`;
+
+  ROOT().querySelectorAll('.pc').forEach(c =>
+    c.addEventListener('click', () => nav('poll', c.dataset.addr)));
+}
+
+function setFilter(f) { filter = f; renderPolls(); }
+
+function pollCard(p) {
+  const tv = p.total_votes;
+  const segs = (p.results||[]).map((v,i) => {
+    const w = tv > 0 ? Math.round(v/tv*100) : Math.round(100/(p.options_count||2));
+    const hue = 220 + i * 38;
+    return `<div class="pc-seg" style="width:${w}%;background:hsl(${hue},65%,58%)"></div>`;
+  }).join('');
+  return `<div class="pc" data-addr="${p.address}">
+    <div class="pc-top"><div class="pc-cat">#${p.poll_id}</div>${badge(p.status)}</div>
+    <div class="pc-title">${p.title}</div>
+    <div class="pc-meta">
+      <span>🗳 ${tv}</span>
+      <span ${p.status==='active' ? `data-countdown="${p.end_time}" data-prefix="⏱ "` : p.status==='upcoming' ? `data-countdown="${p.start_time}" data-prefix="→ "` : ''}>${p.status==='active' ? '⏱ '+timeLeft(p.end_time) : p.status==='upcoming' ? '→ '+timeLeft(p.start_time) : '✓ done'}</span>
+    </div>
+    <div class="pc-bar">${segs}</div>
+  </div>`;
+}
+
+// POLL DETAIL ------------------------------------------------------------------
+async function renderPoll() {
+  ROOT().innerHTML = `<div class="page"><div style="color:var(--text2);font-family:var(--mono);font-size:.85rem">Загрузка…</div></div>`;
+  const poll = await api('GET', `/api/polls/${pollAddr}`);
+  if (poll.error || !poll.title) {
+    ROOT().innerHTML = `<div class="page"><div class="empty"><h3>Не найдено</h3></div></div>`;
+    return;
+  }
+
+  const options = poll.options || Array.from({length:poll.options_count},(_,i)=>`Вариант ${i+1}`);
+  const maxV = Math.max(...(poll.results||[1]));
+  const winIdx = (poll.results||[]).indexOf(maxV);
+  const alreadyVoted = wallet
+    ? poll.results && txLog.some(t => t.poll === pollAddr && t.wallet === wallet)
+    : false;
+
+  ROOT().innerHTML = `<div class="page">
+    <button class="back" onclick="nav('polls')">← НАЗАД</button>
+    <div class="pd-grid">
+      <div>
+        <div class="card" style="margin-bottom:1rem">
+          <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:.5rem;margin-bottom:.7rem">
+            <div style="font-size:.67rem;color:var(--text3);letter-spacing:.08em;text-transform:uppercase;font-family:var(--mono)">#${poll.poll_id}</div>
+            ${badge(poll.status)}
+          </div>
+          <div class="pd-title">${poll.title}</div>
+          <div class="pd-desc">${poll.description||''}</div>
+          <div class="pd-chips">
+            <div class="chip">🗳 ${poll.total_votes} голосов</div>
+            <div class="chip">📅 ${fmtTime(poll.start_time)}</div>
+            <div class="chip">⏰ ${fmtTime(poll.end_time)}</div>
+            ${poll.status==='active' ? `<div class="chip" style="color:var(--green)" data-countdown="${poll.end_time}" data-prefix="⏱ ">⏱ ${timeLeft(poll.end_time)}</div>` : ''}
+            ${poll.status==='upcoming' ? `<div class="chip" style="color:var(--warn)" data-countdown="${poll.start_time}" data-prefix="→ через ">→ через ${timeLeft(poll.start_time)}</div>` : ''}
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="rt">РЕЗУЛЬТАТЫ В РЕАЛЬНОМ ВРЕМЕНИ</div>
+          ${options.map((opt,i) => {
+            const pct = poll.percentages?.[i] ?? 0;
+            const isWin = poll.status!=='active' && i===winIdx && poll.total_votes>0;
+            return `<div class="rr">
+              <div class="rr-top">
+                <div class="rr-label">${LABELS[i]}. ${opt}</div>
+                <div class="rr-nums">
+                  <span class="rr-pct">${pct}%</span>
+                  <span class="rr-cnt">${poll.results?.[i]||0} г.</span>
+                </div>
+              </div>
+              <div class="rr-track"><div class="rr-fill ${isWin?'win':''}" style="width:${pct}%"></div></div>
+            </div>`;
+          }).join('')}
+        </div>
+      </div>
+
+      <div>
+        <div class="card" id="vpanel">${renderVotePanel(poll, options, alreadyVoted)}</div>
+      </div>
+    </div>
+  </div>`;
+}
+
+function renderVotePanel(poll, options, alreadyVoted) {
+  if (poll.status === 'ended') return `
+    <div class="vp-title">ГОЛОСОВАНИЕ ЗАВЕРШЕНО</div>
+    <div class="ib info">Голосование закрыто. Результаты записаны в блокчейн.</div>`;
+
+  if (poll.status === 'upcoming') return `
+    <div class="vp-title">СКОРО НАЧНЁТСЯ</div>
+    <div class="ib warn" data-countdown="${poll.start_time}" data-prefix="Откроется через " data-suffix=".">Откроется через ${timeLeft(poll.start_time)}.</div>`;
+
+  if (!wallet) return `
+    <div class="vp-title">🔐 ПРОГОЛОСОВАТЬ</div>
+    <div class="ib warn">Войдите в аккаунт, чтобы проголосовать.</div>
+    <button class="vsub" onclick="openWallet()">ВОЙТИ</button>`;
+
+  if (!student?.whitelisted) return `
+    <div class="vp-title">⚠ НЕТ ДОСТУПА</div>
+    <div class="ib err">Вы не в вайтлисте. Администратор должен добавить вас.</div>`;
+
+  if (alreadyVoted) return `
+    <div class="vp-title">✓ ВЫ ПРОГОЛОСОВАЛИ</div>
+    <div class="ib ok">Ваш анонимный голос засчитан. Nullifier записан on-chain.</div>
+    <div class="vnote">double-vote protection: nullifier used</div>`;
+
+  const opts = options.map((opt,i) => `
+    <button class="opt ${selOpt===i?'sel':''}" id="opt${i}" onclick="selectOpt(${i})">
+      <span class="ol">${LABELS[i]}</span>
+      <span>${opt}</span>
+    </button>`).join('');
+
+  return `
+    <div class="vp-title">🔐 АНОНИМНОЕ ГОЛОСОВАНИЕ</div>
+    <div class="opts">${opts}</div>
+    <button class="vsub" id="vsub" onclick="doVote('${poll.address}')" ${selOpt===null?'disabled':''}>
+      ПРОГОЛОСОВАТЬ
+    </button>
+    <div class="vnote">ZK-Proof • Groth16 • Merkle inclusion • Nullifier hash</div>`;
+}
+
+function selectOpt(i) {
+  selOpt = i;
+  document.querySelectorAll('.opt').forEach((b,j) => b.classList.toggle('sel', j===i));
+  const s = $('vsub'); if (s) s.removeAttribute('disabled');
+}
+
+async function doVote(addr) {
+  if (selOpt === null || !wallet) return;
+  const panel = $('vpanel');
+
+  // ZK animation steps
+  const steps = [
+    'load identity from storage',
+    'fetch Merkle proof from API',
+    'compute nullifier = poseidon(secret, pollId)',
+    'build Groth16 stub proof',
+    'sign & send transaction',
+  ];
+  panel.innerHTML = `
+    <div class="vp-title">⏳ ГЕНЕРАЦИЯ ZK-PROOF</div>
+    <div class="zk-wrap">${steps.map((s,i)=>`
+      <div class="zk-step" id="zks${i}">
+        <span style="width:10px;opacity:.3">○</span> ${s}
+      </div>`).join('')}
+    </div>
+    <div class="vnote">Отправка в Hardhat node...</div>`;
+
+  for (let i = 0; i < steps.length; i++) {
+    await delay(350 + i * 150);
+    const el = $(`zks${i}`);
+    if (!el) break;
+    el.innerHTML = `<div class="spin"></div> ${steps[i]}`;
+    el.className = 'zk-step running';
+    await delay(400 + i * 80);
+    el.innerHTML = `<span style="color:var(--green)">✓</span> ${steps[i]}`;
+    el.className = 'zk-step done';
+  }
+
+  await delay(300);
+
+  const res = await api('POST', '/api/vote', {
+    poll_address: addr,
+    option_index: selOpt,
+    wallet,
+  });
+
+  if (res.ok || res.tx_hash) {
+    txLog.push({ action: `Vote cast (option ${selOpt})`, hash: res.tx_hash||'', block: res.block||'?', poll: addr, wallet });
+    panel.innerHTML = `
+      <div class="success-box">
+        <div class="sb-icon">✓</div>
+        <div class="sb-title">ГОЛОС ЗАСЧИТАН</div>
+        <div style="font-size:.82rem;color:var(--text2);margin-top:.3rem">${res.message||''}</div>
+        <div class="sb-hash">
+          tx: ${res.tx_hash}<br>
+          nullifier: ${res.nullifier}<br>
+          block: ${res.block} | gas: ${res.gas_used}
+        </div>
+      </div>`;
+    toast('✓ Голос записан в блокчейн!', 'ok');
+    setTimeout(() => renderPoll(), 2000);
+  } else {
+    panel.innerHTML = `
+      <div class="vp-title">⚠ ОШИБКА</div>
+      <div class="ib err">${res.detail || res.error || 'Неизвестная ошибка'}</div>
+      <button class="vsub" onclick="renderPoll()">ПОПРОБОВАТЬ СНОВА</button>`;
+    toast(res.detail || res.error, 'err');
+  }
+}
+
+const delay = ms => new Promise(r => setTimeout(r, ms));
+
+// ADMIN ------------------------------------------------------------------------
+async function renderAdmin() {
+  const status = await checkStatus();
+  const students = await api('GET', '/api/students');
+  const slist = Array.isArray(students) ? students : [];
+
+  ROOT().innerHTML = `<div class="page">
+    <div class="sh" style="margin-bottom:1.25rem">
+      <div class="sh-title">ПАНЕЛЬ АДМИНИСТРАТОРА</div>
+      <span class="sh-tag">${status.node_connected?'node online':'node offline'}</span>
+    </div>
+
+    <div style="margin-bottom:1.5rem">
+      <button class="setup-btn" id="setup-btn" onclick="doSetup()" ${!status.node_connected||status.contracts_deployed?'disabled':''}>
+        ${status.contracts_deployed ? '✓ Контракты задеплоены' : '⚡ БЫСТРЫЙ СТАРТ — задеплоить и настроить всё'}
+      </button>
+      ${!status.node_connected ? '<div class="ib warn">Запустите Hardhat: <span style="font-family:var(--mono)">npx hardhat node</span></div>' : ''}
+    </div>
+
+    ${status.contracts_deployed ? `
+    <div style="margin-bottom:1rem;display:grid;grid-template-columns:1fr 1fr;gap:.5rem">
+      <button class="setup-btn secondary" onclick="doAddAll()">+ Добавить всех в вайтлист</button>
+      <button class="setup-btn secondary" onclick="doSeedPolls()">+ Создать тестовые опросы</button>
+    </div>` : ''}
+
+    <div class="admin-grid">
+      <div class="admin-card">
+        <div class="aca-title">Контракты</div>
+        ${['factory','whitelist','verifier','poseidon'].map(k => `
+          <div class="sr">
+            <div class="sdot ${status.deployments?.[k]?'':'off'}"></div>
+            <div>
+              <div class="sname">${k}</div>
+              <div class="smeta">${status.deployments?.[k] ? status.deployments[k].slice(0,10)+'…'+status.deployments[k].slice(-6) : 'not deployed'}</div>
+            </div>
+          </div>`).join('')}
+      </div>
+
+      <div class="admin-card">
+        <div class="aca-title">Студенты / Вайтлист (${slist.filter(s=>s.whitelisted).length}/${slist.length})</div>
+        ${slist.map(s => `
+          <div class="sr">
+            <div class="sdot ${s.whitelisted?'':'off'}"></div>
+            <div style="flex:1">
+              <div class="sname">${s.name}</div>
+              <div class="smeta">${s.group} · ${s.wallet.slice(0,8)}…</div>
+            </div>
+            ${!s.whitelisted && status.contracts_deployed ? `
+            <button onclick="addOne('${s.wallet}')" style="font-size:.67rem;padding:.2rem .5rem;border-radius:4px;background:var(--ink3);border:1px solid var(--line2);color:var(--text2);cursor:pointer;font-family:'Syne',sans-serif">
+              + add
+            </button>` : ''}
+          </div>`).join('')}
+      </div>
+    </div>
+
+    ${txLog.length ? `
+    <div class="sh" style="margin-top:1.5rem"><div class="sh-title">TX Log</div></div>
+    <div class="admin-card">
+      ${txLog.slice().reverse().map(t=>`
+        <div class="log-entry">
+          <div class="le-action">${t.action}</div>
+          <div class="le-hash">tx: ${t.hash}</div>
+          <div class="le-time">block ${t.block}</div>
+        </div>`).join('')}
+    </div>` : ''}
+  </div>`;
+}
+
+async function doSetup() {
+  const btn = $('setup-btn');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Деплой...'; }
+  toast('Деплой контрактов...', 'info');
+  const r = await api('POST', '/api/admin/setup');
+  if (r.ok) {
+    r.polls?.forEach(p => { if (p.ok) txLog.push({action:`Poll created: ${p.title}`, hash:p.tx_hash, block:p.block}); });
+    toast('✓ Всё настроено!', 'ok');
+    renderAdmin();
+  } else {
+    toast(r.detail || 'Ошибка при деплое', 'err');
+    if (btn) { btn.disabled = false; btn.textContent = '⚡ БЫСТРЫЙ СТАРТ'; }
+  }
+}
+
+async function doAddAll() {
+  toast('Добавление студентов...', 'info');
+  const r = await api('POST', '/api/admin/whitelist/batch/all');
+  r.results?.forEach(res => {
+    if (res.ok) txLog.push({action:`Whitelisted: ${res.student}`, hash:res.tx_hash||'', block:res.block||'?'});
+  });
+  toast('✓ Студенты добавлены', 'ok');
+  renderAdmin();
+}
+
+async function addOne(w) {
+  toast('Добавление...', 'info');
+  const r = await api('POST', `/api/admin/whitelist/${w}`);
+  if (r.ok) {
+    txLog.push({action:`Whitelisted: ${w.slice(0,8)}…`, hash:r.tx_hash||'', block:r.block||'?'});
+    toast('✓ Добавлен', 'ok');
+    renderAdmin();
+  } else {
+    toast(r.detail||'Ошибка', 'err');
+  }
+}
+
+async function doSeedPolls() {
+  toast('Создание опросов...', 'info');
+  const r = await api('POST', '/api/admin/polls/seed');
+  r.polls?.forEach(p => { if (p.ok) txLog.push({action:`Poll: ${p.title}`, hash:p.tx_hash||'', block:p.block||'?'}); });
+  toast('✓ Опросы созданы', 'ok');
+  renderAdmin();
+}
+
+// ─── Init ─────────────────────────────────────────────────────────────────────
+(async () => {
+  await checkStatus();
+  render();
+  setInterval(checkStatus, 15000);
+  setInterval(() => {
+    let expired = false;
+    document.querySelectorAll('[data-countdown]').forEach(el => {
+      const t = +el.dataset.countdown;
+      const left = timeLeft(t);
+      if (!left) { expired = true; return; }
+      const prefix = el.dataset.prefix || '';
+      const suffix = el.dataset.suffix || '';
+      el.textContent = prefix + left + suffix;
+    });
+    if (expired) render();
+  }, 1000);
+})();
+</script>
+</body>
+</html>
