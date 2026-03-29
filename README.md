@@ -111,7 +111,7 @@ pip install -r requirements.txt
 
 ```bash
 cd atomic-choice/contracts
-npm install
+npm install --save-dev hardhat@^2.22.0 @nomicfoundation/hardhat-toolbox@^5.0.0 --legacy-peer-deps
 npx hardhat compile
 ```
 
@@ -128,7 +128,6 @@ npx hardhat node
 
 ```bash
 cd atomic-choice
-cp .env.example .env
 uvicorn main:app --reload --port 8000
 ```
 
