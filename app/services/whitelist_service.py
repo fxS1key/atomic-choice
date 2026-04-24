@@ -1,6 +1,6 @@
 """
 Whitelist service.
-Manages adding students to the on-chain Whitelist contract
+Manages adding students/participants to the on-chain Whitelist contract
 and keeps the off-chain Merkle tree in sync.
 """
 import logging
@@ -20,40 +20,39 @@ async def get_whitelist_info() -> dict:
     size  = contract.functions.size().call()
     depth = contract.functions.depth().call()
     return {
-        "root":  str(root),
-        "root_hex": hex(root),
-        "size":  size,
-        "depth": depth,
+        "root":      str(root),
+        "root_hex":  hex(root),
+        "size":      size,
+        "depth":     depth,
     }
 
 
 async def add_student_to_whitelist(wallet: str) -> dict:
     """
-    Adds a student's identity commitment to the on-chain Whitelist.
-    Returns tx receipt info.
+    Adds a participant's identity commitment to the on-chain Whitelist.
+    Works for both seed students and keypair participants.
     """
     student = get_by_wallet(wallet)
     if not student:
-        raise ValueError(f"Student not found: {wallet}")
+        raise ValueError(f"Участник не найден: {wallet}")
     if student.whitelisted:
-        raise ValueError(f"Student already whitelisted: {wallet}")
+        raise ValueError(f"Участник уже в вайтлисте: {wallet}")
 
-    contract  = get_whitelist_contract()
-    account   = get_deployer_account()
-
+    contract   = get_whitelist_contract()
+    account    = get_deployer_account()
     commitment = student.commitment
+
     logger.info(
         "Adding commitment to whitelist | wallet=%s name=%s commitment=%s",
         student.wallet_short, student.name, hex(commitment)
     )
 
-    fn = contract.functions.addCommitment(commitment)
+    fn      = contract.functions.addCommitment(commitment)
     receipt = send_tx(fn, account.address, settings.DEPLOYER_PRIVATE_KEY)
 
     if receipt["status"] != 1:
         raise RuntimeError("Transaction reverted")
 
-    # Sync off-chain tree
     get_tree().insert(commitment)
     mark_whitelisted(wallet)
 
@@ -61,7 +60,7 @@ async def add_student_to_whitelist(wallet: str) -> dict:
     size     = contract.functions.size().call()
 
     logger.info(
-        "✓ Commitment added | student=%s | new_root=%s | tree_size=%d",
+        "✓ Commitment added | participant=%s | new_root=%s | tree_size=%d",
         student.name, hex(new_root), size
     )
 
@@ -76,9 +75,12 @@ async def add_student_to_whitelist(wallet: str) -> dict:
 
 
 async def add_all_students_to_whitelist() -> list[dict]:
-    """Batch-adds all seed students. Called during demo setup."""
+    """Batch-adds all seed students (not keypair participants). Called during demo setup."""
     results = []
     for student in get_all():
+        # Только seed-студенты (keypairs добавляются отдельно)
+        if student.group == "keypair":
+            continue
         if not student.whitelisted:
             try:
                 result = await add_student_to_whitelist(student.wallet)
@@ -101,7 +103,7 @@ async def sync_tree_from_chain():
 
     rebuild_tree_from_events(commitments)
 
-    # Mark whitelisted students
+    # Mark whitelisted participants
     for e in events:
         c = int(e["args"]["commitment"])
         for student in get_all():
@@ -114,20 +116,20 @@ async def sync_tree_from_chain():
 def get_merkle_proof_for_wallet(wallet: str) -> dict:
     student = get_by_wallet(wallet)
     if not student:
-        raise ValueError("Student not found")
+        raise ValueError("Участник не найден")
     if not student.whitelisted:
-        raise ValueError("Student not in whitelist yet")
+        raise ValueError("Участник не в глобальном вайтлисте")
 
-    tree  = get_tree()
-    idx   = tree.index_of(student.commitment)
+    tree = get_tree()
+    idx  = tree.index_of(student.commitment)
     if idx == -1:
-        raise ValueError("Commitment not in local tree — re-sync required")
+        raise ValueError("Commitment не найден в локальном дереве — требуется ресинк")
 
     proof = tree.proof(idx)
     return {
-        "commitment":   str(student.commitment),
-        "leaf_index":   idx,
+        "commitment":    str(student.commitment),
+        "leaf_index":    idx,
         "path_elements": [str(x) for x in proof["path_elements"]],
-        "path_indices": proof["path_indices"],
-        "root":         str(proof["root"]),
+        "path_indices":  proof["path_indices"],
+        "root":          str(proof["root"]),
     }

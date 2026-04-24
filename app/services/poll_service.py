@@ -1,6 +1,13 @@
 """
 Poll service.
 Creates polls via VotingFactory and reads poll data from VotingPoll contracts.
+
+Изменения:
+  - Результаты скрыты (возвращаются нули) пока голосование активно.
+    Это решает проблему анонимности: никто не может отслеживать
+    динамику голосования в реальном времени.
+  - castVote использует per-poll whitelist если участник там есть.
+  - Регистрация создателя голосования при создании.
 """
 import logging
 import time
@@ -56,21 +63,20 @@ async def create_poll(
     options: list[str],
     start_offset_seconds: int = 60,
     duration_seconds: int = 86400,
+    creator_wallet: str | None = None,
 ) -> dict:
     factory = get_factory_contract()
     account = get_deployer_account()
     sync_chain_time()
-    now       = int(time.time())
-    start     = now + start_offset_seconds
-    end     = start + duration_seconds
+    now   = int(time.time())
+    start = now + start_offset_seconds
+    end   = start + duration_seconds
 
     logger.info(
         "Creating poll | title=%r | options=%d | start=%d | end=%d",
         title, len(options), start, end
     )
 
-    # Store option labels in description as JSON suffix
-    # (the contract stores only count; labels live in description)
     import json
     desc_full = json.dumps({
         "text": description,
@@ -89,7 +95,6 @@ async def create_poll(
     if receipt["status"] != 1:
         raise RuntimeError("createPoll transaction reverted")
 
-    # Get poll address from PollCreated event
     factory_contract = get_factory_contract()
     logs = factory_contract.events.PollCreated().process_receipt(receipt)
     if not logs:
@@ -99,22 +104,28 @@ async def create_poll(
     poll_addr = event["args"]["pollAddress"]
     poll_id   = event["args"]["pollId"]
 
+    # Регистрируем создателя голосования для per-poll whitelist
+    from app.services.poll_whitelist_service import register_poll_creator
+    effective_creator = creator_wallet or account.address
+    register_poll_creator(poll_addr, effective_creator)
+
     logger.info(
-        "✓ Poll created | id=%d | address=%s | tx=%s | block=%d",
-        poll_id, poll_addr,
+        "✓ Poll created | id=%d | address=%s | creator=%s | tx=%s | block=%d",
+        poll_id, poll_addr, effective_creator[:10] + "…",
         receipt["transactionHash"].hex(),
         receipt["blockNumber"],
     )
     return {
         "poll_id":      poll_id,
         "poll_address": poll_addr,
+        "creator":      effective_creator,
         "tx_hash":      receipt["transactionHash"].hex(),
         "block":        receipt["blockNumber"],
         "gas_used":     receipt["gasUsed"],
     }
 
 
-async def get_all_polls() -> list[dict]:
+async def get_all_polls(reveal_results: bool = False) -> list[dict]:
     factory = get_factory_contract()
     total   = factory.functions.totalPolls().call()
     if total == 0:
@@ -124,74 +135,84 @@ async def get_all_polls() -> list[dict]:
     polls = []
     for addr in addresses:
         try:
-            polls.append(await _read_poll(addr))
+            polls.append(await _read_poll(addr, reveal_results=reveal_results))
         except Exception as e:
             logger.warning("Failed to read poll %s: %s", addr, e)
     return polls
 
 
-async def get_poll(address: str) -> dict:
-    return await _read_poll(address)
+async def get_poll(address: str, reveal_results: bool = False) -> dict:
+    return await _read_poll(address, reveal_results=reveal_results)
 
 
 async def cast_vote(poll_address: str, option_index: int, voter_wallet: str) -> dict:
     """
     Full voting flow:
     1. Load student identity
-    2. Get Merkle proof
+    2. Get Merkle proof (per-poll whitelist first, then global)
     3. Compute nullifier
     4. Build stub ZK proof
     5. Submit castVote() transaction
+
+    Анонимность:
+    - msg.sender всегда deployer (не раскрывает личность)
+    - В транзакции видно только nullifierHash (не связан с адресом без знания secret)
+    - Результаты скрыты до окончания голосования
     """
     student = get_by_wallet(voter_wallet)
     if not student:
-        raise ValueError("Wallet not in student registry")
-    if not student.whitelisted:
-        raise ValueError("Student not whitelisted — admin must add you first")
+        raise ValueError("Кошелёк не найден в реестре участников")
+
+    # Проверяем членство: per-poll или глобальный вайтлист
+    if not student.is_whitelisted_for_poll(poll_address) and not student.whitelisted:
+        raise ValueError(
+            "Участник не в вайтлисте этого голосования. "
+            "Создатель голосования должен добавить вас через POST /api/polls/{address}/whitelist"
+        )
 
     poll_contract = get_poll_contract(poll_address)
     sync_chain_time()
 
-    # Read poll metadata
-    poll_id      = poll_contract.functions.pollId().call()
-    start_time   = poll_contract.functions.startTime().call()
-    end_time     = poll_contract.functions.endTime().call()
+    poll_id       = poll_contract.functions.pollId().call()
+    start_time    = poll_contract.functions.startTime().call()
+    end_time      = poll_contract.functions.endTime().call()
     options_count = poll_contract.functions.optionsCount().call()
 
     now = int(time.time())
     if now < start_time:
-        raise ValueError("Poll has not started yet")
+        raise ValueError("Голосование ещё не началось")
     if now > end_time:
-        raise ValueError("Poll has ended")
+        raise ValueError("Голосование уже завершено")
     if option_index >= options_count:
-        raise ValueError(f"Invalid option index {option_index}")
+        raise ValueError(f"Недопустимый номер варианта: {option_index}")
 
-    # Compute nullifier
     nullifier = nullifier_of(student.secret, poll_id)
 
-    # Check double-vote
     if poll_contract.functions.nullifierUsed(nullifier).call():
-        raise ValueError("You have already voted in this poll (nullifier used)")
+        raise ValueError("Вы уже проголосовали в этом голосовании (nullifier использован)")
 
-    # Get Merkle proof
-    proof_data  = get_merkle_proof_for_wallet(voter_wallet)
-    merkle_root = int(proof_data["root"])
+    # Получаем Merkle proof: сначала per-poll, потом глобальный
+    try:
+        from app.services.poll_whitelist_service import get_poll_merkle_proof
+        proof_data  = get_poll_merkle_proof(poll_address, voter_wallet)
+        merkle_root = int(proof_data["root"])
+    except ValueError:
+        # Fallback: глобальный вайтлист
+        proof_data  = get_merkle_proof_for_wallet(voter_wallet)
+        merkle_root = int(proof_data["root"])
 
-    # Verify root is accepted by poll
+    # Проверяем что root принят контрактом голосования
     if not poll_contract.functions.validRoots(merkle_root).call():
-        # Try current whitelist root
         from app.core.blockchain import get_whitelist_contract
         wl = get_whitelist_contract()
         current_root = wl.functions.root().call()
         if not poll_contract.functions.validRoots(current_root).call():
             raise ValueError(
-                "Merkle root mismatch. "
-                "The poll was created before you were whitelisted. "
-                "Admin must call addWhitelistRoot() on the poll."
+                "Merkle root не принят контрактом. "
+                "Создатель голосования должен обновить корень вайтлиста."
             )
         merkle_root = current_root
 
-    # Build stub proof (VerifierStub accepts anything)
     zk = make_stub_proof(nullifier, merkle_root, option_index, poll_id)
 
     logger.info(
@@ -209,7 +230,8 @@ async def cast_vote(poll_address: str, option_index: int, voter_wallet: str) -> 
         zk["pB"],
         zk["pC"],
     )
-    account = get_deployer_account()  # demo: server signs on behalf of voter
+    # Транзакция всегда подписывается от deployer — личность голосующего скрыта
+    account = get_deployer_account()
     receipt = send_tx(fn, account.address, settings.DEPLOYER_PRIVATE_KEY)
 
     if receipt["status"] != 1:
@@ -233,7 +255,7 @@ async def cast_vote(poll_address: str, option_index: int, voter_wallet: str) -> 
         "nullifier":   hex(nullifier),
         "merkle_root": str(merkle_root),
         "total_votes": total_votes,
-        "message":     "✓ Голос анонимно засчитан в блокчейне",
+        "message":     "✓ Голос анонимно засчитан в блокчейне. Результаты будут открыты после завершения голосования.",
     }
 
 
@@ -258,7 +280,17 @@ async def seed_polls() -> list[dict]:
 
 # ── Internal reader ───────────────────────────────────────────────────────────
 
-async def _read_poll(address: str) -> dict:
+async def _read_poll(address: str, reveal_results: bool = False) -> dict:
+    """
+    Читает данные голосования из контракта.
+
+    reveal_results=False (по умолчанию):
+      Пока голосование активно — возвращает нули вместо реальных результатов.
+      Это защищает от "бандвагон-эффекта" и сохраняет конфиденциальность.
+
+    reveal_results=True:
+      Полные данные. Используется только после endTime или по явному запросу.
+    """
     import json as _json
     contract = get_poll_contract(address)
 
@@ -271,9 +303,8 @@ async def _read_poll(address: str) -> dict:
     state         = contract.functions.state().call()
     total_votes   = contract.functions.totalVotes().call()
     is_active     = contract.functions.isActive().call()
-    results       = contract.functions.getResults().call()
+    raw_results   = contract.functions.getResults().call()
 
-    # Parse options from description JSON
     options = []
     desc    = raw_desc
     try:
@@ -293,22 +324,39 @@ async def _read_poll(address: str) -> dict:
     else:
         status = "ended"
 
-    total = sum(results) or 1
-    percentages = [round(v / total * 100) for v in results]
+    # ── Скрываем результаты пока голосование активно ──────────────────────────
+    results_hidden = (status == "active") and not reveal_results
+    if results_hidden:
+        results     = [0] * options_count
+        percentages = [0] * options_count
+    else:
+        results = [int(r) for r in raw_results]
+        total   = sum(results) or 1
+        percentages = [round(v / total * 100) for v in results]
+
+    # Создатель голосования (из per-poll registry)
+    from app.services.poll_whitelist_service import (
+        get_poll_creator, get_poll_members
+    )
+    creator = get_poll_creator(address)
+    members = get_poll_members(address)
 
     return {
-        "address":      address,
-        "poll_id":      poll_id,
-        "title":        title,
-        "description":  desc,
-        "options":      options,
-        "start_time":   start_time,
-        "end_time":     end_time,
-        "options_count": options_count,
-        "state":        state,
-        "status":       status,
-        "total_votes":  total_votes,
-        "is_active":    is_active,
-        "results":      [int(r) for r in results],
-        "percentages":  percentages,
+        "address":        address,
+        "poll_id":        poll_id,
+        "title":          title,
+        "description":    desc,
+        "options":        options,
+        "start_time":     start_time,
+        "end_time":       end_time,
+        "options_count":  options_count,
+        "state":          state,
+        "status":         status,
+        "total_votes":    total_votes,
+        "is_active":      is_active,
+        "results":        results,
+        "percentages":    percentages,
+        "results_hidden": results_hidden,
+        "creator":        creator,
+        "poll_whitelist": members,
     }

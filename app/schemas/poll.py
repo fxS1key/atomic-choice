@@ -10,6 +10,14 @@ class PollCreate(BaseModel):
     duration_seconds: int = Field(default=86400, ge=60, description="Duration in seconds")
 
 
+class PollCreateWithCreator(PollCreate):
+    """PollCreate + опциональный creator_wallet для per-poll whitelist."""
+    creator_wallet: Optional[str] = Field(
+        default=None,
+        description="Кошелёк создателя голосования. Только этот адрес сможет управлять вайтлистом."
+    )
+
+
 class VoteRequest(BaseModel):
     poll_address: str
     option_index: int = Field(..., ge=0, le=15)
