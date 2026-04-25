@@ -61,7 +61,10 @@ _SEED = [
 
 def _secret_from_private_key(private_key_hex: str) -> int:
     """Детерминированный ZK-секрет из приватного ключа (для keypair участников)."""
-    raw = bytes.fromhex(private_key_hex.lstrip("0x"))
+    hex_str = private_key_hex.strip()
+    if hex_str.startswith(("0x", "0X")):
+        hex_str = hex_str[2:]
+    raw = bytes.fromhex(hex_str)
     return int(hashlib.sha256(raw).hexdigest(), 16) % SNARK_FIELD
 
 

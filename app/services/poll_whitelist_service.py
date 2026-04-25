@@ -15,7 +15,9 @@ Per-poll whitelist service.
   - Метаданные "кто создал" хранятся в _poll_creators (in-memory).
   - В production — проверка подписи создателя через EIP-712.
 """
+import json
 import logging
+from pathlib import Path
 from typing import Optional
 
 from web3 import Web3
@@ -43,11 +45,70 @@ _poll_creators: dict[str, str] = {}
 _poll_members: dict[str, list[str]] = {}
 
 
+# ── Disk persistence ──────────────────────────────────────────────────────────
+# Хранение в JSON позволяет переживать рестарты сервера. Само off-chain дерево
+# восстанавливается из members + commitments при загрузке.
+
+_PERSIST_FILE = Path("poll_whitelists.json")
+
+
+def _save_state():
+    data = {
+        "creators": _poll_creators,
+        "members":  _poll_members,
+    }
+    try:
+        _PERSIST_FILE.write_text(json.dumps(data, indent=2))
+    except Exception as e:
+        logger.warning("Could not persist poll whitelists: %s", e)
+
+
+def load_state():
+    """Восстанавливает creators/members/trees из poll_whitelists.json при старте."""
+    if not _PERSIST_FILE.exists():
+        return
+    try:
+        data = json.loads(_PERSIST_FILE.read_text())
+    except Exception as e:
+        logger.warning("Could not read %s: %s", _PERSIST_FILE, e)
+        return
+
+    _poll_creators.update({k.lower(): v.lower() for k, v in data.get("creators", {}).items()})
+    _poll_members.update({k.lower(): list(v) for k, v in data.get("members", {}).items()})
+
+    # Восстанавливаем off-chain деревья и помечаем студентов
+    for poll_addr, members in _poll_members.items():
+        tree = IncrementalMerkleTree(depth=10)
+        for wallet in members:
+            student = get_by_wallet(wallet)
+            if student is None:
+                from app.models.student import add_student
+                try:
+                    cs_wallet = Web3.to_checksum_address(wallet)
+                except Exception:
+                    cs_wallet = wallet
+                student = add_student(
+                    wallet=cs_wallet,
+                    name=f"Гость {cs_wallet[:6]}…{cs_wallet[-4:]}",
+                    group="external",
+                )
+            tree.insert(student.commitment)
+            mark_whitelisted_for_poll(student.wallet, poll_addr)
+        _poll_trees[poll_addr] = tree
+
+    if _poll_creators:
+        logger.info(
+            "Restored %d poll whitelists from %s",
+            len(_poll_creators), _PERSIST_FILE,
+        )
+
+
 def register_poll_creator(poll_address: str, creator_wallet: str):
     """Вызывается при создании голосования, фиксирует создателя."""
     _poll_creators[poll_address.lower()] = creator_wallet.lower()
     _poll_trees[poll_address.lower()] = IncrementalMerkleTree(depth=10)
     _poll_members[poll_address.lower()] = []
+    _save_state()
     logger.info("Poll %s registered, creator=%s", poll_address[:10] + "…", creator_wallet[:10] + "…")
 
 
@@ -90,13 +151,27 @@ async def add_wallet_to_poll_whitelist(
             f"Ожидался: {creator[:10]}…, получен: {requester_wallet[:10]}…"
         )
 
+    # ── Валидация адреса ──────────────────────────────────────────────────────
+    try:
+        voter_wallet = Web3.to_checksum_address(voter_wallet)
+    except Exception:
+        raise ValueError(f"Некорректный адрес кошелька: {voter_wallet}")
+
     # ── Найти/создать участника ────────────────────────────────────────────────
+    # Если адрес не в реестре — авто-регистрируем как «гостевого» участника.
+    # ZK-секрет вычисляется детерминированно из server_salt + wallet,
+    # поэтому никаких приватных ключей сервер не хранит.
     student = get_by_wallet(voter_wallet)
     if student is None:
-        raise ValueError(
-            f"Кошелёк {voter_wallet} не найден в реестре участников. "
-            f"Сначала добавьте его через POST /api/admin/students или "
-            f"убедитесь, что он был сгенерирован при старте."
+        from app.models.student import add_student
+        student = add_student(
+            wallet=voter_wallet,
+            name=f"Гость {voter_wallet[:6]}…{voter_wallet[-4:]}",
+            group="external",
+        )
+        logger.info(
+            "Auto-registered new participant %s for poll-only access",
+            voter_wallet[:10] + "…",
         )
 
     # ── Off-chain дерево для этого голосования ────────────────────────────────
@@ -130,6 +205,7 @@ async def add_wallet_to_poll_whitelist(
     # Пометить участника как вайтлистнутого для этого голосования
     mark_whitelisted_for_poll(voter_wallet, poll_address)
     _poll_members[poll_addr_lower].append(voter_wallet)
+    _save_state()
 
     logger.info(
         "✓ Added %s to poll %s whitelist | new_root=%s | tree_size=%d",

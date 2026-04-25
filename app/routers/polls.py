@@ -13,7 +13,7 @@ Polls router.
 """
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from app.services.poll_service import get_all_polls, get_poll, cast_vote
+from app.services.poll_service import get_all_polls, get_poll, cast_vote, build_vote_message
 from app.services.whitelist_service import get_merkle_proof_for_wallet
 from app.schemas.poll import VoteRequest
 from app.core.blockchain import is_connected
@@ -132,10 +132,26 @@ async def add_to_poll_whitelist(address: str, req: PollWhitelistRequest):
 
 # ── Vote ──────────────────────────────────────────────────────────────────────
 
+@router.get("/vote/message")
+async def vote_message(poll_address: str, option_index: int, nonce: str):
+    """
+    Возвращает каноническое сообщение для подписи приватным ключом.
+    Используется фронтендом перед вызовом personal_sign.
+    """
+    return {"message": build_vote_message(poll_address, option_index, nonce)}
+
+
 @router.post("/vote")
 async def vote(req: VoteRequest):
     try:
-        result = await cast_vote(req.poll_address, req.option_index, req.wallet)
+        result = await cast_vote(
+            poll_address=req.poll_address,
+            option_index=req.option_index,
+            voter_wallet=req.wallet,
+            signature=req.signature,
+            message=req.message,
+            nonce=req.nonce,
+        )
         return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

@@ -73,10 +73,41 @@ def make_stub_proof(nullifier: int, root: int, vote: int, poll_id: int) -> dict:
 
 
 # ── Seed identities for test students ─────────────────────────────────────────
-# Each student gets a deterministic secret derived from their wallet address.
-# This makes the demo reproducible.
+# Each student gets a secret derived from `wallet || server_salt`.
+# Server-side salt is generated once and persisted to keys.json — это ломает
+# тривиальную деривацию `sha256(wallet)`, поэтому посторонний наблюдатель
+# не может восстановить nullifier из публичного адреса.
+
+import os
+from pathlib import Path
+
+_SECRET_SALT_FILE = Path("server_salt.bin")
+
+
+def _load_server_salt() -> bytes:
+    """Загружает (или создаёт) серверный salt 32 байта."""
+    if _SECRET_SALT_FILE.exists():
+        data = _SECRET_SALT_FILE.read_bytes()
+        if len(data) == 32:
+            return data
+    salt = secrets.token_bytes(32)
+    _SECRET_SALT_FILE.write_bytes(salt)
+    return salt
+
+
+_SERVER_SALT = _load_server_salt()
+
 
 def student_secret(wallet: str) -> int:
-    """Deterministic secret for a given wallet (demo only)."""
-    raw = wallet.lower().encode()
+    """
+    ZK-секрет для seed-участника.
+
+    Использует серверный salt + нижний регистр кошелька. Без знания salt
+    невозможно вычислить nullifier из публичного адреса — анонимность
+    сохраняется даже на публичных on-chain событиях.
+
+    NB. Для keypair-участников используется `sha256(private_key)`
+    (см. app/models/student.py — _secret_from_private_key).
+    """
+    raw = _SERVER_SALT + wallet.lower().encode()
     return int(hashlib.sha256(raw).hexdigest(), 16) % SNARK_FIELD

@@ -28,6 +28,32 @@ logger = logging.getLogger("atomic-choice.polls")
 OPTION_LABELS = ["А", "Б", "В", "Г", "Д", "Е", "Ж", "З", "И", "К",
                  "Л", "М", "Н", "О", "П", "Р"]
 
+
+# ── Vote-authorization message ────────────────────────────────────────────────
+# Канонический формат сообщения, которое голосующий подписывает в браузере.
+# Формат фиксирован, чтобы бэкенд мог точно восстановить и сравнить сообщение.
+
+def build_vote_message(poll_address: str, option_index: int, nonce: str) -> str:
+    return (
+        "Atomic Choice — confirm vote\n"
+        f"poll: {poll_address.lower()}\n"
+        f"option: {option_index}\n"
+        f"nonce: {nonce}"
+    )
+
+
+# ── Anti-replay nonce storage ────────────────────────────────────────────────
+# In-memory: (poll_lower, wallet_lower, nonce) → True
+_used_nonces: set[tuple[str, str, str]] = set()
+
+
+def _is_nonce_used(poll_address: str, wallet: str, nonce: str) -> bool:
+    key = (poll_address.lower(), wallet.lower(), nonce)
+    if key in _used_nonces:
+        return True
+    _used_nonces.add(key)
+    return False
+
 # ── Seed poll definitions ────────────────────────────────────────────────────
 
 SEED_POLLS = [
@@ -145,29 +171,75 @@ async def get_poll(address: str, reveal_results: bool = False) -> dict:
     return await _read_poll(address, reveal_results=reveal_results)
 
 
-async def cast_vote(poll_address: str, option_index: int, voter_wallet: str) -> dict:
+async def cast_vote(
+    poll_address: str,
+    option_index: int,
+    voter_wallet: str,
+    signature: str,
+    message: str,
+    nonce: str,
+) -> dict:
     """
     Full voting flow:
-    1. Load student identity
-    2. Get Merkle proof (per-poll whitelist first, then global)
-    3. Compute nullifier
-    4. Build stub ZK proof
-    5. Submit castVote() transaction
+    1. Verify EIP-191 signature → recover signer wallet (proof-of-private-key)
+    2. Load student identity
+    3. Check per-poll whitelist (or global)
+    4. Get Merkle proof
+    5. Compute nullifier
+    6. Build stub ZK proof
+    7. Submit castVote() via deployer relay (preserves on-chain anonymity)
+
+    Авторизация:
+    - Голос подписывается приватным ключом голосующего (EIP-191 personal_sign).
+    - Сервер восстанавливает адрес из подписи → подтверждает владение PK.
+    - Только этот адрес используется для проверки вайтлиста (claim не доверяем).
 
     Анонимность:
-    - msg.sender всегда deployer (не раскрывает личность)
-    - В транзакции видно только nullifierHash (не связан с адресом без знания secret)
-    - Результаты скрыты до окончания голосования
+    - msg.sender on-chain — deployer (не раскрывает личность голосующего).
+    - В транзакции видно только nullifierHash.
+    - Результаты скрыты до окончания голосования.
     """
+    from eth_account.messages import encode_defunct
+    from eth_account import Account
+
+    expected_message = build_vote_message(poll_address, option_index, nonce)
+    if message.strip() != expected_message:
+        raise ValueError(
+            "Подписанное сообщение не совпадает с ожидаемым. "
+            "Голосование отклонено."
+        )
+
+    try:
+        recovered = Account.recover_message(
+            encode_defunct(text=message), signature=signature
+        )
+    except Exception as e:
+        raise ValueError(f"Не удалось проверить подпись: {e}")
+
+    if recovered.lower() != voter_wallet.lower():
+        raise ValueError(
+            "Подпись не соответствует указанному адресу. "
+            "Голосуйте только своим приватным ключом."
+        )
+
+    # ── Anti-replay: тот же nonce нельзя использовать дважды для пары (poll, wallet)
+    if _is_nonce_used(poll_address, voter_wallet, nonce):
+        raise ValueError("Этот nonce уже использовался — повторите попытку.")
+
     student = get_by_wallet(voter_wallet)
     if not student:
         raise ValueError("Кошелёк не найден в реестре участников")
 
-    # Проверяем членство: per-poll или глобальный вайтлист
-    if not student.is_whitelisted_for_poll(poll_address) and not student.whitelisted:
+    # ── Membership check ──────────────────────────────────────────────────────
+    # Если участник в per-poll whitelist — он голосует ТОЛЬКО в этом голосовании.
+    # Если в глобальном — может голосовать в любом.
+    in_poll_wl = student.is_whitelisted_for_poll(poll_address)
+    in_global  = student.whitelisted
+
+    if not in_poll_wl and not in_global:
         raise ValueError(
-            "Участник не в вайтлисте этого голосования. "
-            "Создатель голосования должен добавить вас через POST /api/polls/{address}/whitelist"
+            "Вы не в вайтлисте этого голосования. "
+            "Создатель должен добавить вас через POST /api/polls/{address}/whitelist."
         )
 
     poll_contract = get_poll_contract(poll_address)
@@ -215,11 +287,15 @@ async def cast_vote(poll_address: str, option_index: int, voter_wallet: str) -> 
 
     zk = make_stub_proof(nullifier, merkle_root, option_index, poll_id)
 
+    # NB. Анонимность: не логируем option_index и личность голосующего
+    # на уровне INFO. Только nullifier (псевдоним) и факт голосования.
     logger.info(
-        "Casting vote | voter=%s (%s) | poll=%d | option=%d | nullifier=%s",
-        student.name, student.wallet_short,
-        poll_id, option_index,
-        hex(nullifier)[:18] + "…"
+        "Casting anonymous vote | poll=%d | nullifier=%s",
+        poll_id, hex(nullifier)[:18] + "…"
+    )
+    logger.debug(
+        "[debug] voter=%s (%s) option=%d",
+        student.name, student.wallet_short, option_index,
     )
 
     fn = poll_contract.functions.castVote(
@@ -240,8 +316,8 @@ async def cast_vote(poll_address: str, option_index: int, voter_wallet: str) -> 
     total_votes = poll_contract.functions.totalVotes().call()
 
     logger.info(
-        "✓ Vote cast | voter=%s | poll=%d | option=%d | tx=%s | block=%d | total_votes=%d",
-        student.name, poll_id, option_index,
+        "✓ Anonymous vote cast | poll=%d | tx=%s | block=%d | total_votes=%d",
+        poll_id,
         receipt["transactionHash"].hex(),
         receipt["blockNumber"],
         total_votes,

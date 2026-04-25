@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+.claude/
+# Virtual environment
+.venv/
+
+# Environment variables
+.env
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Node (contracts)
+contracts/node_modules/
+
+# Hardhat
+contracts/cache/
+contracts/artifacts/
+
+# App
+deployments.json

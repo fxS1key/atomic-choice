@@ -49,6 +49,10 @@ async def lifespan(app: FastAPI):
     for kp in keypairs:
         add_keypair_participant(kp["wallet"], kp["private_key"], kp["index"])
 
+    # Восстанавливаем per-poll вайтлисты с диска (poll_whitelists.json)
+    from app.services.poll_whitelist_service import load_state as load_poll_whitelists
+    load_poll_whitelists()
+
     # ── Шаг 2: Загрузка деплоев ───────────────────────────────────────────────
     d = load_deployments()
     if d:

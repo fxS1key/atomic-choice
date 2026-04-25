@@ -154,6 +154,78 @@
   .empty-sub    { font-size: 13px; color: var(--muted2); }
 
   .divider { height: 1px; background: var(--border); margin: 28px 0; }
+
+  /* ── Auth modal ─────────────────────────────────────────────────────── */
+  .auth-overlay {
+    position: fixed; inset: 0; z-index: 1000;
+    background: rgba(46,31,74,0.55); backdrop-filter: blur(6px);
+    display: flex; align-items: center; justify-content: center;
+    padding: 20px;
+  }
+  .auth-card {
+    background: rgba(255,255,255,0.96);
+    border: 1px solid var(--border2);
+    border-radius: 18px;
+    padding: 32px 30px;
+    max-width: 460px; width: 100%;
+    box-shadow: 0 20px 60px rgba(46,31,74,0.18);
+  }
+  .auth-logo { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; }
+  .auth-logo .logo-mark { width: 38px; height: 38px; }
+  .auth-logo .logo-mark img { width: 38px; height: 38px; }
+  .auth-title { font-family: var(--font-head); font-size: 22px; font-weight: 700; }
+  .auth-sub   { color: var(--muted); font-size: 13.5px; margin-bottom: 20px; line-height: 1.5; }
+  .auth-input {
+    width: 100%;
+    padding: 12px 14px;
+    border-radius: 10px;
+    border: 1px solid var(--border2);
+    background: var(--surface2);
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    font-size: 12.5px;
+    color: var(--text);
+    margin-bottom: 12px;
+    outline: none;
+    transition: border-color 0.15s;
+  }
+  .auth-input:focus { border-color: var(--accent); }
+  .auth-error {
+    color: var(--red);
+    font-size: 12.5px;
+    background: var(--red-bg);
+    border: 1px solid var(--red);
+    border-radius: 8px;
+    padding: 8px 12px;
+    margin-bottom: 12px;
+    display: none;
+  }
+  .auth-error.show { display: block; }
+  .auth-hint {
+    font-size: 12px;
+    color: var(--muted);
+    background: var(--accent-glow);
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin-top: 14px;
+    line-height: 1.5;
+  }
+  .logout-btn {
+    background: none; border: 1px solid var(--border2);
+    color: var(--muted); padding: 4px 12px; border-radius: 16px;
+    cursor: pointer; font-size: 12px; transition: all 0.15s;
+  }
+  .logout-btn:hover { color: var(--red); border-color: var(--red); }
+  .toast {
+    position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+    background: var(--text); color: #fff; padding: 12px 22px;
+    border-radius: 24px; font-size: 13.5px;
+    box-shadow: 0 6px 24px rgba(0,0,0,0.22);
+    z-index: 2000; opacity: 0; pointer-events: none;
+    transition: opacity 0.2s, transform 0.2s;
+  }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(-4px); }
+  .toast.error { background: var(--red); }
+  .toast.success { background: var(--green); }
 </style>
 </head>
 <body>
@@ -170,9 +242,36 @@
     <button class="nav-btn" onclick="showPage('my', this)">Мои опросы</button>
   </div>
   <div class="nav-right">
-    <div class="user-pill"><div class="user-dot"></div><span id="nav-username">username</span></div>
+    <div class="user-pill"><div class="user-dot"></div><span id="nav-username">не авторизован</span></div>
+    <button class="logout-btn" id="logout-btn" onclick="logout()" style="display:none;">Выйти</button>
   </div>
 </nav>
+
+<div class="auth-overlay" id="auth-overlay" style="display:none;">
+  <div class="auth-card">
+    <div class="auth-logo">
+      <div class="logo-mark"><img src="/static/logo.png" alt="logo" onerror="this.style.display='none'"></div>
+      <div class="auth-title">Atomic Choice</div>
+    </div>
+    <div class="auth-sub">
+      Введите ваш приватный ключ, чтобы войти в систему.
+      Ключ проверяется по вайтлисту участников и нужен для подписи транзакций.
+      <b>Ключ не покидает ваш браузер</b> и используется только для деривации адреса.
+    </div>
+    <input id="auth-pk" class="auth-input" type="password"
+           placeholder="0x..." autocomplete="off" spellcheck="false">
+    <div id="auth-error" class="auth-error"></div>
+    <button class="primary-btn" id="auth-submit" onclick="doLogin()" style="width:100%;">
+      Войти
+    </button>
+    <div class="auth-hint">
+      💡 Тестовые ключи находятся в файле <b>keys.txt</b> в корне проекта.
+      Каждому участнику раздаётся одна строка.
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast"></div>
 
 <div class="page active" id="page-home">
   <div class="section-header">
@@ -261,13 +360,15 @@
   <div id="detail-content"></div>
 </div>
 
+<script src="https://cdn.jsdelivr.net/npm/ethers@5.7.2/dist/ethers.umd.min.js"></script>
 <script>
 'use strict';
 
-function numify(str) {
-  return str.replace(/(\d[\d\-]*\d|\d)/g, '<span class="num">$1</span>');
-}
+/* ─────────────────────────  Helpers  ───────────────────────── */
 
+function numify(str) {
+  return String(str).replace(/(\d[\d\-]*\d|\d)/g, '<span class="num">$1</span>');
+}
 function calcTimeLeft(endDate) {
   const diff = (endDate instanceof Date ? endDate : new Date(endDate)) - Date.now();
   if (diff <= 0) return 'Завершено';
@@ -277,7 +378,6 @@ function calcTimeLeft(endDate) {
   if (h > 0) return `${h}ч ${min}м`;
   return `${min}м`;
 }
-
 function calcTimeUntilStart(startDate) {
   const diff = (startDate instanceof Date ? startDate : new Date(startDate)) - Date.now();
   if (diff <= 0) return 'Начинается';
@@ -287,111 +387,260 @@ function calcTimeUntilStart(startDate) {
   if (h > 0) return `через ${h}ч ${min}м`;
   return `через ${min}м`;
 }
-
 function fmtDT(val) {
   if (!val) return '—';
-  const d = new Date(val);
+  const d = (val instanceof Date) ? val : new Date(val);
+  if (isNaN(d.getTime())) return '—';
   const p = n => String(n).padStart(2, '0');
   return `${p(d.getDate())}.${p(d.getMonth()+1)}.${d.getFullYear()} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
-
-function recalcPct(options) {
-  const total = options.reduce((s, o) => s + o.votes, 0);
-  if (total === 0) { options.forEach(o => o.pct = 0); return; }
-  const floats = options.map(o => o.votes / total * 100);
-  const floors = floats.map(Math.floor);
-  let rem = 100 - floors.reduce((a, b) => a + b, 0);
-  floats.map((f, i) => ({ i, d: f - floors[i] })).sort((a, b) => b.d - a.d)
-        .forEach(({ i }) => { if (rem-- > 0) floors[i]++; });
-  options.forEach((o, i) => o.pct = floors[i]);
-}
-
-const votes = {
-  star1: {
-    topic: 'Организация', title: 'Выборы старосты группы ИТ-31',
-    desc: 'Голосование за старосту группы ИТ-31 на осенний семестр 2024 года. Кандидаты прошли предварительный отбор студенческим советом.',
-    status: 'active', total: 44, start: '10.04.2024', end: '22.04.2024', timeLeft: '4д 12ч',
-    options: [{label:'Алексей Петров',votes:18,pct:41},{label:'Мария Иванова',votes:16,pct:36},{label:'Дмитрий Козлов',votes:10,pct:23}],
-    questions: null, canVote: true, isOwner: true
-  },
-  star2: {
-    topic: 'Организация', title: 'Выборы старосты группы ИТ-32',
-    desc: 'Голосование за старосту группы ИТ-32 на осенний семестр 2024 года. Кандидаты выдвинуты самими студентами группы.',
-    status: 'active', total: 38, start: '10.04.2024', end: '22.04.2024', timeLeft: '4д 12ч',
-    options: [{label:'Светлана Орлова',votes:20,pct:53},{label:'Игорь Васильев',votes:12,pct:31},{label:'Анна Соколова',votes:6,pct:16}],
-    questions: null, canVote: true, isOwner: false
-  },
-  event1: {
-    topic: 'Мероприятия', title: 'Формат проведения Дня первокурсника',
-    desc: 'Помогите выбрать оптимальный формат для главного события осеннего семестра — Дня первокурсника факультета ИТ.',
-    status: 'active', total: 61, start: '08.04.2024', end: '20.04.2024', timeLeft: '2д 6ч',
-    options: [{label:'Квест по корпусам',votes:28,pct:46},{label:'Вечеринка в актовом зале',votes:22,pct:36},{label:'Спортивный марафон',votes:11,pct:18}],
-    questions: null, canVote: true, isOwner: false
-  },
-  ai: {
-    topic: 'Исследование', title: 'Сможет ли ИИ заменить человека?',
-    desc: 'Анонимный опрос среди студентов и преподавателей факультета о роли искусственного интеллекта в будущем рынка труда.',
-    status: 'ended', total: 112, start: '01.03.2024', end: '31.03.2024', timeLeft: 'Завершено',
-    options: [{label:'Да',votes:38,pct:34},{label:'Нет',votes:41,pct:37},{label:'Затрудняюсь ответить',votes:33,pct:29}],
-    questions: null, canVote: false, isOwner: false
-  },
-  math: {
-    topic: 'Исследование', title: 'Какой предмет вам даётся тяжелее всего?',
-    desc: 'Исследование академической нагрузки первокурсников. Результаты будут переданы в учебную часть для корректировки расписания.',
-    status: 'ended', total: 89, start: '05.03.2024', end: '20.03.2024', timeLeft: 'Завершено',
-    options: [{label:'Математический анализ',votes:42,pct:47},{label:'Линейная алгебра',votes:31,pct:35},{label:'Аналитическая геометрия',votes:16,pct:18}],
-    questions: null, canVote: false, isOwner: false
-  },
-  canteen: {
-    topic: 'Общее', title: 'Какая ваша любимая столовая?',
-    desc: 'Анонимный опрос среди студентов факультета о предпочтениях в выборе столовой.',
-    status: 'scheduled', total: 0,
-    start: '01.05.2026 09:00', end: '07.05.2026 23:59',
-    startDate: new Date('2026-05-01T09:00:00'),
-    endDate:   new Date('2026-05-07T23:59:00'),
-    timeLeft: '—',
-    options: [{label:'Синяя',votes:0,pct:0},{label:'Оранжевая',votes:0,pct:0}],
-    questions: null, canVote: false, isOwner: true
-  },
-  event2: {
-    topic: 'Мероприятия', title: 'Тема ежегодной научной конференции',
-    desc: 'Выберите тему для ежегодной студенческой научной конференции факультета информационных технологий.',
-    status: 'ended', total: 74, start: '01.02.2024', end: '15.02.2024', timeLeft: 'Завершено',
-    options: [{label:'ИИ и общество',votes:35,pct:47},{label:'Кибербезопасность',votes:26,pct:35},{label:'Квантовые вычисления',votes:13,pct:18}],
-    questions: null, canVote: false, isOwner: true
-  }
-};
-
-let currentPage = 'home';
-let prevPage    = 'home';
-const selectedOptions = {};
-
-function renderAll() {
-  renderHomeCards();
-  renderAllVotesList();
-  renderMyVotesList();
-}
-
 function pluralVotes(n) {
   const mod10 = n % 10, mod100 = n % 100;
   if (mod10 === 1 && mod100 !== 11) return '';
   if ([2,3,4].includes(mod10) && ![12,13,14].includes(mod100)) return 'а';
   return 'ов';
 }
+function shortAddr(a) { return a ? a.slice(0,6)+'…'+a.slice(-4) : ''; }
+function showToast(msg, type) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.className = 'toast show ' + (type || '');
+  setTimeout(() => el.classList.remove('show'), 3500);
+}
+
+/* ─────────────────────────  API client  ───────────────────────── */
+
+const api = {
+  async _fetch(url, opts) {
+    const res = await fetch(url, opts);
+    let body = null;
+    try { body = await res.json(); } catch(_) {}
+    if (!res.ok) {
+      const msg = (body && (body.detail || body.message)) || ('HTTP ' + res.status);
+      throw new Error(msg);
+    }
+    return body;
+  },
+  status:        () => api._fetch('/api/admin/status'),
+  listStudents:  () => api._fetch('/api/students'),
+  getStudent:    (w) => api._fetch('/api/students/' + w),
+  listPolls:     () => api._fetch('/api/polls'),
+  getPoll:       (a) => api._fetch('/api/polls/' + a),
+  getResults:    (a) => api._fetch('/api/polls/' + a + '/results'),
+  getPollWl:     (a) => api._fetch('/api/polls/' + a + '/whitelist'),
+  addPollWl:     (a, body) => api._fetch('/api/polls/' + a + '/whitelist', {
+                    method:'POST',
+                    headers:{'Content-Type':'application/json'},
+                    body: JSON.stringify(body),
+                  }),
+  vote:          (body) => api._fetch('/api/vote', {
+                    method:'POST',
+                    headers:{'Content-Type':'application/json'},
+                    body: JSON.stringify(body),
+                  }),
+  createPoll:    (body) => api._fetch('/api/admin/polls', {
+                    method:'POST',
+                    headers:{'Content-Type':'application/json'},
+                    body: JSON.stringify(body),
+                  }),
+};
+
+/* ─────────────────────────  Auth  ───────────────────────── */
+
+const SESSION_KEY = 'atomic_choice_session_v1';
+let session = null;
+
+function loadSession() {
+  try {
+    const raw = sessionStorage.getItem(SESSION_KEY);
+    if (raw) session = JSON.parse(raw);
+  } catch(_) { session = null; }
+}
+function saveSession() {
+  if (session) sessionStorage.setItem(SESSION_KEY, JSON.stringify(session));
+  else sessionStorage.removeItem(SESSION_KEY);
+}
+
+function showAuth() { document.getElementById('auth-overlay').style.display = 'flex'; }
+function hideAuth() { document.getElementById('auth-overlay').style.display = 'none'; }
+function showError(msg) {
+  const el = document.getElementById('auth-error');
+  el.textContent = msg;
+  el.classList.add('show');
+}
+function clearError() {
+  document.getElementById('auth-error').classList.remove('show');
+}
+
+async function doLogin() {
+  clearError();
+  const inp = document.getElementById('auth-pk');
+  let pk = (inp.value || '').trim();
+  if (!pk) return showError('Введите приватный ключ');
+  if (!pk.startsWith('0x')) pk = '0x' + pk;
+  if (!/^0x[0-9a-fA-F]{64}$/.test(pk)) {
+    return showError('Неверный формат: ожидается 0x + 64 hex-символа');
+  }
+  let wallet;
+  try {
+    if (!window.ethers) throw new Error('ethers.js не загружен');
+    const w = new window.ethers.Wallet(pk);
+    wallet = w.address;
+  } catch (e) {
+    return showError('Не удалось вычислить адрес: ' + e.message);
+  }
+
+  try {
+    const s = await api.getStudent(wallet);
+    const eligible = s.eligible || s.whitelisted ||
+                     (Array.isArray(s.poll_whitelisted) && s.poll_whitelisted.length > 0);
+    if (!eligible) {
+      return showError('Адрес ' + shortAddr(wallet) +
+        ' не в вайтлисте. Обратитесь к создателю голосования.');
+    }
+    session = {
+      wallet:           s.wallet,
+      name:             s.name,
+      group:            s.group,
+      privateKey:       pk,
+      whitelisted:      !!s.whitelisted,
+      poll_whitelisted: Array.isArray(s.poll_whitelisted) ? s.poll_whitelisted : [],
+    };
+    saveSession();
+    onLoggedIn();
+  } catch (e) {
+    const msg = String(e.message || e).toLowerCase();
+    if (msg.includes('not found') || msg.includes('404')) {
+      showError('Адрес ' + shortAddr(wallet) + ' не зарегистрирован в системе. ' +
+                'Создатель голосования должен добавить вас в вайтлист.');
+    } else {
+      showError(e.message);
+    }
+  }
+}
+
+function logout() {
+  session = null;
+  saveSession();
+  document.getElementById('logout-btn').style.display = 'none';
+  document.getElementById('auth-pk').value = '';
+  document.getElementById('nav-username').textContent = 'не авторизован';
+  pollsCache = {};
+  renderAll();
+  showAuth();
+}
+
+function onLoggedIn() {
+  hideAuth();
+  document.getElementById('logout-btn').style.display = '';
+  document.getElementById('nav-username').textContent =
+    (session.name || 'Участник') + ' · ' + shortAddr(session.wallet);
+  refreshAll();
+}
+
+/* ─────────────────────────  Data layer  ───────────────────────── */
+
+let pollsCache = {};
+let votedPollIds = {};
+
+const TOPIC_FALLBACK = 'Общее';
+
+function tsToDate(t) { return new Date((t || 0) * 1000); }
+
+function pollStatus(p) {
+  const now = Date.now();
+  if (p.status === 'ended' || p.state === 1) return 'ended';
+  if (now < tsToDate(p.start_time)) return 'scheduled';
+  if (now > tsToDate(p.end_time))   return 'ended';
+  return 'active';
+}
+
+function normalizePoll(raw) {
+  const start = tsToDate(raw.start_time);
+  const end   = tsToDate(raw.end_time);
+  const status = pollStatus(raw);
+  const isOwner = !!(session && raw.creator &&
+    raw.creator.toLowerCase() === session.wallet.toLowerCase());
+  const optionLabels = (raw.options && raw.options.length) ? raw.options
+    : Array.from({length: raw.options_count || 0}, (_,i)=>'Вариант '+(i+1));
+
+  const opts = optionLabels.map((label, i) => ({
+    label,
+    votes: (raw.results || [])[i] || 0,
+    pct:   (raw.percentages || [])[i] || 0,
+  }));
+
+  return {
+    id:        raw.address,
+    address:   raw.address,
+    poll_id:   raw.poll_id,
+    creator:   raw.creator,
+    topic:     TOPIC_FALLBACK,
+    title:     raw.title,
+    desc:      raw.description || '',
+    status,
+    total:     raw.total_votes || 0,
+    start:     fmtDT(start),
+    end:       fmtDT(end),
+    startDate: start,
+    endDate:   end,
+    timeLeft:  status === 'active' ? calcTimeLeft(end)
+              : status === 'scheduled' ? calcTimeUntilStart(start) : 'Завершено',
+    options:   opts,
+    questions: null,
+    canVote:   status === 'active' && !isOwner && !votedPollIds[raw.address],
+    isOwner,
+    members:   raw.poll_whitelist || [],
+    resultsHidden: !!raw.results_hidden,
+  };
+}
+
+async function loadPolls() {
+  try {
+    const r = await api.listPolls();
+    const list = (r.polls || []).map(normalizePoll);
+    pollsCache = {};
+    list.forEach(p => pollsCache[p.address] = p);
+    return list;
+  } catch (e) {
+    console.error('loadPolls', e);
+    showToast('Не удалось загрузить голосования: ' + e.message, 'error');
+    return [];
+  }
+}
+
+async function refreshAll() {
+  await loadPolls();
+  renderAll();
+}
+
+/* ─────────────────────────  Rendering  ───────────────────────── */
+
+let currentPage = 'home';
+let prevPage    = 'home';
+const selectedOptions = {};
+let lastDetailId = null;
+
+function renderAll() {
+  renderHomeCards();
+  renderAllVotesList();
+  renderMyVotesList();
+  if (currentPage === 'detail' && lastDetailId) showDetail(lastDetailId, true);
+}
 
 function renderHomeCards() {
   const grid  = document.getElementById('home-grid');
   const empty = document.getElementById('home-empty');
   const pill  = document.getElementById('home-count');
-  const active = Object.entries(votes).filter(([, v]) => v.status === 'active');
+  const items = Object.values(pollsCache).filter(v => v.status === 'active');
   Array.from(grid.children).forEach(c => { if (c !== empty) c.remove(); });
-  if (active.length === 0) { empty.style.display = ''; pill.textContent = '0 активных'; return; }
+  if (items.length === 0) { empty.style.display = ''; pill.textContent = '0 активных'; return; }
   empty.style.display = 'none';
-  pill.textContent = `${active.length} активных`;
-  active.forEach(([id, v]) => {
+  pill.textContent = `${items.length} активных`;
+  items.forEach(v => {
     const card = document.createElement('div');
     card.className = 'vote-card';
-    card.onclick = () => showDetail(id);
+    card.onclick = () => showDetail(v.id);
     card.innerHTML = `
       <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px;">
         <div class="vote-topic">${v.topic}</div>
@@ -409,24 +658,22 @@ function renderHomeCards() {
 function renderAllVotesList() {
   const list  = document.getElementById('votes-list');
   const empty = document.getElementById('all-empty');
-  const all   = Object.entries(votes);
+  const all   = Object.values(pollsCache);
   Array.from(list.children).forEach(c => { if (c !== empty) c.remove(); });
-  if (all.length === 0) { empty.style.display = ''; return; }
-  empty.style.display = 'none';
-  all.forEach(([id, v]) => {
+  if (all.length === 0) { if (empty) empty.style.display = ''; return; }
+  if (empty) empty.style.display = 'none';
+  all.forEach(v => {
     const card = document.createElement('div');
     card.className = 'vote-card';
     card.dataset.status = v.status;
-    card.onclick = () => showDetail(id);
-    const isActive    = v.status === 'active';
-    const isScheduled = v.status === 'scheduled';
+    card.onclick = () => showDetail(v.id);
     let badgeHtml, metaRight, metaStyle;
-    if (isActive) {
+    if (v.status === 'active') {
       badgeHtml = `<span class="badge badge-active"><span class="badge-dot"></span>Активно</span>`;
       metaRight = `⏱ ${v.timeLeft}`; metaStyle = '';
-    } else if (isScheduled) {
+    } else if (v.status === 'scheduled') {
       badgeHtml = `<span class="badge badge-scheduled"><span class="badge-dot"></span>Запланировано</span>`;
-      metaRight = `🕐 ${v.startDate ? calcTimeUntilStart(v.startDate) : v.start}`; metaStyle = 'color:var(--muted2)';
+      metaRight = `🕐 ${calcTimeUntilStart(v.startDate)}`; metaStyle = 'color:var(--muted2)';
     } else {
       badgeHtml = `<span class="badge badge-ended"><span class="badge-dot"></span>Завершено</span>`;
       metaRight = 'Завершено'; metaStyle = 'color:var(--muted2)';
@@ -448,23 +695,21 @@ function renderAllVotesList() {
 function renderMyVotesList() {
   const list  = document.getElementById('my-votes-list');
   const empty = document.getElementById('my-empty');
-  const mine  = Object.entries(votes).filter(([, v]) => v.isOwner);
+  const mine  = Object.values(pollsCache).filter(v => v.isOwner);
   Array.from(list.children).forEach(c => { if (c !== empty) c.remove(); });
-  if (mine.length === 0) { empty.style.display = ''; return; }
-  empty.style.display = 'none';
-  mine.forEach(([id, v]) => {
+  if (mine.length === 0) { if (empty) empty.style.display = ''; return; }
+  if (empty) empty.style.display = 'none';
+  mine.forEach(v => {
     const row = document.createElement('div');
     row.className = 'my-vote-row';
-    row.onclick = () => showDetail(id);
-    const isActive    = v.status === 'active';
-    const isScheduled = v.status === 'scheduled';
+    row.onclick = () => showDetail(v.id);
     let badgeHtml, metaSuffix;
-    if (isActive) {
+    if (v.status === 'active') {
       badgeHtml  = `<span class="badge badge-active"><span class="badge-dot"></span>Активно</span>`;
       metaSuffix = `До конца: ${v.timeLeft}`;
-    } else if (isScheduled) {
+    } else if (v.status === 'scheduled') {
       badgeHtml  = `<span class="badge badge-scheduled"><span class="badge-dot"></span>Запланировано</span>`;
-      metaSuffix = v.startDate ? calcTimeUntilStart(v.startDate) : v.start;
+      metaSuffix = calcTimeUntilStart(v.startDate);
     } else {
       badgeHtml  = `<span class="badge badge-ended"><span class="badge-dot"></span>Завершено</span>`;
       metaSuffix = 'Завершено';
@@ -489,82 +734,108 @@ function showPage(name, btn) {
   currentPage = name;
   window.scrollTo(0, 0);
 }
-
 function goBack() { showPage(prevPage); }
 
-function showDetail(id) {
-  const v = votes[id];
-  if (currentPage !== 'detail') prevPage = currentPage;
-  currentPage = 'detail';
+async function showDetail(id, keepHistory) {
+  let v = pollsCache[id];
+  if (!v) {
+    try {
+      const raw = await api.getPoll(id);
+      v = normalizePoll(raw);
+      pollsCache[id] = v;
+    } catch (e) { showToast(e.message, 'error'); return; }
+  }
+  if (v.status === 'ended' && !v.options.some(o => o.votes > 0)) {
+    try {
+      const r = await api.getResults(id);
+      v.options = (r.options || []).map((label, i) => ({
+        label,
+        votes: (r.results || [])[i] || 0,
+        pct:   (r.percentages || [])[i] || 0,
+      }));
+      v.total = r.total_votes;
+    } catch(_) { /* still hidden */ }
+  }
 
+  if (!keepHistory && currentPage !== 'detail') prevPage = currentPage;
+  currentPage = 'detail';
+  lastDetailId = id;
+
+  const voted = !!votedPollIds[id];
   let optionsHtml = '';
   if (v.isOwner && v.status !== 'scheduled') {
     optionsHtml = `<div style="background:var(--accent-glow);border:1px solid var(--border2);border-radius:10px;padding:14px 18px;margin-bottom:24px;display:flex;align-items:center;gap:10px;">
       <span style="font-size:16px;">🔒</span>
-      <span style="font-size:13.5px;color:var(--accent2);">Вы создали этот опрос — участие недоступно. Ниже отображаются результаты в реальном времени.</span>
-    </div>`;
+      <span style="font-size:13.5px;color:var(--accent2);">Вы создали этот опрос — участие недоступно. Результаты появятся после завершения голосования.</span>
+    </div>` + ownerWhitelistHtml(v);
   } else if (v.status === 'scheduled') {
-    const untilStart = v.startDate ? calcTimeUntilStart(v.startDate) : '';
     optionsHtml = `<div style="background:rgba(245,166,35,0.08);border:1px solid rgba(245,166,35,0.3);border-radius:10px;padding:20px 24px;margin-bottom:24px;display:flex;flex-direction:column;align-items:center;gap:8px;text-align:center;">
       <span style="font-size:28px;">🕐</span>
       <div style="font-family:var(--font-head);font-size:15px;font-weight:600;color:#9a6800;">Голосование ещё не началось</div>
       <div style="font-size:13px;color:var(--muted);">Начало: <b style="color:var(--text)">${v.start}</b></div>
-      ${untilStart ? `<div style="font-size:13px;color:var(--muted2);">${untilStart}</div>` : ''}
+      <div style="font-size:13px;color:var(--muted2);">${calcTimeUntilStart(v.startDate)}</div>
     </div>`;
-  } else if (selectedOptions[id + '_voted']) {
-    const chosen = v.options[selectedOptions[id]];
+    if (v.isOwner) optionsHtml += ownerWhitelistHtml(v);
+  } else if (voted) {
+    const chosenIdx = selectedOptions[id];
+    const chosen = v.options[chosenIdx];
     optionsHtml = `<div style="background:var(--green-bg);border:1px solid var(--green);border-radius:10px;padding:14px 18px;margin-bottom:24px;display:flex;align-items:center;gap:10px;">
       <span style="font-size:16px;">✓</span>
       <div>
-        <div style="font-size:13.5px;color:var(--green);font-weight:500;">Ваш голос учтён</div>
-        <div style="font-size:12px;color:var(--muted);margin-top:2px;">Вы проголосовали за: <b style="color:var(--text)">${chosen.label}</b></div>
+        <div style="font-size:13.5px;color:var(--green);font-weight:500;">Ваш голос анонимно учтён</div>
+        ${chosen ? `<div style="font-size:12px;color:var(--muted);margin-top:2px;">Вариант: <b style="color:var(--text)">${chosen.label}</b></div>` : ''}
       </div>
     </div>`;
-  } else if (v.canVote) {
-    let choices = '';
-    v.options.forEach((o, i) => {
-      const sel = selectedOptions[id] === i ? 'selected' : '';
-      choices += `<div class="option-choice ${sel}" onclick="selectOption('${id}',${i},this)">
-        <div class="option-radio"><div class="option-radio-dot"></div></div>
-        <div class="option-choice-label">${o.label}</div>
-      </div>`;
-    });
-    optionsHtml = `<div class="vote-options">${choices}
-      <button class="primary-btn" onclick="submitVote('${id}')" style="margin-top:8px;">Проголосовать</button>
-    </div>`;
-  }
+  } else if (v.status === 'active' && session) {
+    const idLower = String(id).toLowerCase();
+    const allowedPolls = (session.poll_whitelisted || []).map(a => String(a).toLowerCase());
+    const canVoteHere = session.whitelisted || allowedPolls.includes(idLower);
 
-  const canSeeResults = v.status !== 'scheduled' &&
-    (v.isOwner || selectedOptions[id + '_voted'] || v.status === 'ended');
-  let resultsHtml = '';
-  if (canSeeResults) {
-    resultsHtml = '<div class="results-section">';
-    if (v.questions && v.questions.length > 1) {
-      v.questions.forEach((q, qi) => {
-        resultsHtml += `<div class="results-title" style="margin-top:${qi > 0 ? '24px' : '0'}">Вопрос ${qi+1}: ${q.text}</div>`;
-        q.options.forEach(o => {
-          resultsHtml += `<div class="result-row">
-            <div class="result-row-header"><span class="result-name">${o.label}</span><span class="result-pct">${o.pct}%</span></div>
-            <div class="result-bar"><div class="result-fill" style="width:${o.pct}%"></div></div>
-          </div>`;
-        });
-      });
+    if (!canVoteHere) {
+      optionsHtml = `<div style="background:rgba(245,166,35,0.08);border:1px solid rgba(245,166,35,0.3);border-radius:10px;padding:18px 22px;margin-bottom:24px;display:flex;flex-direction:column;align-items:center;gap:6px;text-align:center;">
+        <span style="font-size:24px;">🔒</span>
+        <div style="font-family:var(--font-head);font-size:15px;font-weight:600;color:#9a6800;">Вы не в вайтлисте этого голосования</div>
+        <div style="font-size:13px;color:var(--muted);max-width:380px;line-height:1.5;">Создатель голосования должен добавить ваш адрес в вайтлист, чтобы вы могли проголосовать.</div>
+      </div>`;
+      if (v.isOwner) optionsHtml += ownerWhitelistHtml(v);
     } else {
-      resultsHtml += '<div class="results-title">Результаты в реальном времени</div>';
-      v.options.forEach(o => {
-        resultsHtml += `<div class="result-row">
-          <div class="result-row-header"><span class="result-name">${o.label}</span><span class="result-pct">${o.pct}%</span></div>
-          <div class="result-bar"><div class="result-fill" style="width:${o.pct}%"></div></div>
+      let choices = '';
+      v.options.forEach((o, i) => {
+        const sel = selectedOptions[id] === i ? 'selected' : '';
+        choices += `<div class="option-choice ${sel}" onclick="selectOption('${id}',${i},this)">
+          <div class="option-radio"><div class="option-radio-dot"></div></div>
+          <div class="option-choice-label">${o.label}</div>
         </div>`;
       });
+      optionsHtml = `<div class="vote-options">${choices}
+        <button class="primary-btn" id="btn-submit-vote" onclick="submitVote('${id}')" style="margin-top:8px;">Проголосовать</button>
+      </div>`;
+      if (v.isOwner) optionsHtml += ownerWhitelistHtml(v);
     }
+  }
+
+  const canSeeResults = v.status === 'ended' ||
+                        (v.status === 'active' && (v.isOwner || voted));
+  let resultsHtml = '';
+  if (canSeeResults && !v.resultsHidden) {
+    resultsHtml = '<div class="results-section">';
+    resultsHtml += '<div class="results-title">Результаты' +
+                   (v.status === 'ended' ? '' : ' (предварительно)') + '</div>';
+    v.options.forEach(o => {
+      resultsHtml += `<div class="result-row">
+        <div class="result-row-header"><span class="result-name">${o.label}</span><span class="result-pct">${o.pct}%</span></div>
+        <div class="result-bar"><div class="result-fill" style="width:${o.pct}%"></div></div>
+      </div>`;
+    });
     resultsHtml += '</div>';
   } else {
     resultsHtml = `<div class="results-section">
       <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--r2);padding:28px 24px;display:flex;flex-direction:column;align-items:center;gap:10px;text-align:center;">
         <span style="font-size:28px;opacity:0.4;">🔒</span>
         <div style="font-family:var(--font-head);font-size:15px;font-weight:600;color:var(--muted);">Результаты скрыты</div>
-        <div style="font-size:13px;color:var(--muted2);max-width:280px;line-height:1.5;">Проголосуйте, чтобы увидеть, как распределились голоса других участников</div>
+        <div style="font-size:13px;color:var(--muted2);max-width:340px;line-height:1.5;">
+          Чтобы сохранить анонимность и предотвратить «эффект толпы», результаты публикуются только после завершения голосования${v.isOwner ? '' : ', либо после того как вы сами проголосуете'}.
+        </div>
       </div>
     </div>`;
   }
@@ -590,7 +861,7 @@ function showDetail(id) {
       <div class="detail-stat">
         <div class="detail-stat-label">${v.status === 'active' ? 'До конца' : v.status === 'scheduled' ? 'До начала' : 'Статус'}</div>
         <div class="detail-stat-value" style="color:${v.status === 'active' ? 'var(--green)' : v.status === 'scheduled' ? '#9a6800' : 'var(--muted)'}">
-          ${v.status === 'scheduled' && v.startDate ? calcTimeUntilStart(v.startDate) : v.timeLeft}
+          ${v.status === 'scheduled' ? calcTimeUntilStart(v.startDate) : v.timeLeft}
         </div>
       </div>
     </div>
@@ -600,7 +871,45 @@ function showDetail(id) {
 
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
   document.getElementById('page-detail').classList.add('active');
-  window.scrollTo(0, 0);
+  if (!keepHistory) window.scrollTo(0, 0);
+}
+
+function ownerWhitelistHtml(v) {
+  const m = v.members || [];
+  const rows = m.length === 0
+    ? `<div style="color:var(--muted2);font-size:13px;padding:8px 0;">Пока нет участников. Добавьте кошелёк ниже.</div>`
+    : m.map(addr => `<div style="display:flex;justify-content:space-between;font-family:var(--font-num);font-size:12.5px;padding:6px 0;border-bottom:1px solid var(--border);">
+        <span style="color:var(--muted);">${shortAddr(addr)}</span>
+        <span style="color:var(--green);font-size:11.5px;">в вайтлисте</span>
+      </div>`).join('');
+  return `<div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--r2);padding:18px 22px;margin-bottom:24px;">
+    <div style="font-family:var(--font-head);font-size:15px;font-weight:600;margin-bottom:10px;">Вайтлист голосования (${m.length})</div>
+    ${rows}
+    <div style="display:flex;gap:8px;margin-top:14px;">
+      <input id="wl-input-${v.id}" class="form-input" type="text" placeholder="0x... адрес участника" style="flex:1;font-family:var(--font-num);font-size:12.5px;">
+      <button class="secondary-btn" onclick="addToWhitelist('${v.id}')">Добавить</button>
+    </div>
+    <div style="font-size:11.5px;color:var(--muted2);margin-top:8px;line-height:1.5;">
+      Только участники из этого списка смогут проголосовать. Вы — создатель — управляете списком.
+    </div>
+  </div>`;
+}
+
+async function addToWhitelist(pollId) {
+  if (!session) return showToast('Войдите в систему', 'error');
+  const inp = document.getElementById('wl-input-' + pollId);
+  const voter = (inp.value || '').trim();
+  if (!voter) return showToast('Введите адрес', 'error');
+  try {
+    await api.addPollWl(pollId, {
+      voter_wallet:     voter,
+      requester_wallet: session.wallet,
+    });
+    showToast('Участник добавлен в вайтлист', 'success');
+    inp.value = '';
+    await refreshAll();
+    showDetail(pollId, true);
+  } catch (e) { showToast(e.message, 'error'); }
 }
 
 function selectOption(id, idx, el) {
@@ -610,16 +919,59 @@ function selectOption(id, idx, el) {
   });
 }
 
-function submitVote(id) {
-  if (selectedOptions[id] === undefined) { alert('Пожалуйста, выберите вариант ответа'); return; }
-  const v = votes[id];
-  v.total++;
-  v.options[selectedOptions[id]].votes++;
-  recalcPct(v.options);
-  if (v.questions) v.questions.forEach(q => recalcPct(q.options));
-  selectedOptions[id + '_voted'] = true;
-  showDetail(id);
-  renderAll();
+async function submitVote(id) {
+  if (!session) return showToast('Войдите в систему', 'error');
+  if (!session.privateKey) return showToast('Сессия повреждена — войдите заново', 'error');
+  const idx = selectedOptions[id];
+  if (idx === undefined) return showToast('Выберите вариант ответа', 'error');
+
+  // Pre-flight: запрещаем голосовать в чужих опросах (и UI-проверка, и серверная)
+  if (!session.whitelisted) {
+    const allowed = (session.poll_whitelisted || []).map(a => String(a).toLowerCase());
+    if (!allowed.includes(String(id).toLowerCase())) {
+      return showToast('Вы не в вайтлисте этого голосования', 'error');
+    }
+  }
+
+  const btn = document.getElementById('btn-submit-vote');
+  if (btn) { btn.disabled = true; btn.textContent = 'Подпись приватным ключом…'; }
+  try {
+    if (!window.ethers) throw new Error('ethers.js не загружен');
+
+    // 1. Случайный nonce + каноническое сообщение (тот же формат, что на сервере)
+    const nonce = (window.crypto && crypto.getRandomValues
+      ? Array.from(crypto.getRandomValues(new Uint8Array(16)))
+              .map(b => b.toString(16).padStart(2, '0')).join('')
+      : Math.random().toString(16).slice(2));
+    const message =
+      'Atomic Choice — confirm vote\n' +
+      'poll: ' + String(id).toLowerCase() + '\n' +
+      'option: ' + idx + '\n' +
+      'nonce: ' + nonce;
+
+    // 2. Подпись приватным ключом из сессии (EIP-191 personal_sign)
+    const wallet = new window.ethers.Wallet(session.privateKey);
+    const signature = await wallet.signMessage(message);
+
+    if (btn) btn.textContent = 'Отправляем голос…';
+
+    // 3. Сервер проверит подпись, восстановит адрес, и зарелеит castVote через deployer
+    await api.vote({
+      poll_address: id,
+      option_index: idx,
+      wallet:       session.wallet,
+      signature:    signature,
+      message:      message,
+      nonce:        nonce,
+    });
+    votedPollIds[id] = true;
+    showToast('Голос подписан и анонимно учтён в блокчейне ✓', 'success');
+    await refreshAll();
+    showDetail(id, true);
+  } catch (e) {
+    showToast(e.message, 'error');
+    if (btn) { btn.disabled = false; btn.textContent = 'Проголосовать'; }
+  }
 }
 
 function filterVotes(btn, filter) {
@@ -630,6 +982,8 @@ function filterVotes(btn, filter) {
     card.style.display = card.dataset.status === filter ? '' : 'none';
   });
 }
+
+/* ─────────────────────────  Create poll  ───────────────────────── */
 
 let qCount = 1;
 function addQuestion() {
@@ -645,7 +999,6 @@ function addQuestion() {
     <button class="add-link" onclick="addOption(this)">+ Добавить вариант</button>`;
   document.getElementById('questions-container').appendChild(div);
 }
-
 function addOption(btn) {
   const list = btn.previousElementSibling;
   const count = list.children.length + 1;
@@ -654,70 +1007,118 @@ function addOption(btn) {
   row.innerHTML = `<input class="option-input" placeholder="Вариант ${count}"><button class="remove-btn" onclick="removeOption(this)">×</button>`;
   list.appendChild(row);
 }
-
 function removeOption(btn) {
   const list = btn.parentElement.parentElement;
   if (list.children.length > 2) btn.parentElement.remove();
 }
 
-function saveVote() {
+async function saveVote() {
+  if (!session) return showToast('Войдите в систему', 'error');
+
   const allInputs = document.querySelectorAll('#page-create .create-form .form-input');
-  const topic = allInputs[0].value.trim() || 'Общее';
-  const title = allInputs[1] ? allInputs[1].value.trim() : '';
-  if (!title) { alert('Введите название голосования'); return; }
+  const topic = (allInputs[0].value || '').trim() || 'Общее';
+  const title = (allInputs[1] ? allInputs[1].value : '').trim();
+  if (!title) return showToast('Введите название голосования', 'error');
+  if (title.length < 3) return showToast('Название слишком короткое (мин. 3 символа)', 'error');
+
   const descEl = document.querySelector('#page-create .create-form .form-textarea');
   const desc = descEl ? descEl.value.trim() : '';
+
   const dateInputs = document.querySelectorAll('#page-create .form-input[type="datetime-local"]');
   const startVal = dateInputs[0] ? dateInputs[0].value : '';
   const endVal   = dateInputs[1] ? dateInputs[1].value : '';
-  const endDate  = endVal ? new Date(endVal) : new Date(Date.now() + 7 * 86400000);
-  const questions = [];
-  document.querySelectorAll('#page-create .question-block').forEach((block, qi) => {
-    const qInput = block.querySelector('.form-input');
-    const qText  = qInput ? qInput.value.trim() : '';
-    const opts   = Array.from(block.querySelectorAll('.option-input')).map(i => i.value.trim()).filter(Boolean);
-    if (opts.length >= 2) questions.push({ text: qText || `Вопрос ${qi + 1}`, options: opts.map(label => ({ label, votes: 0, pct: 0 })) });
-  });
-  if (questions.length === 0) { alert('Добавьте минимум 2 варианта в первом вопросе'); return; }
-  const startDate = startVal ? new Date(startVal) : null;
-  const isScheduled = startDate && startDate > Date.now();
-  const id = 'vote_' + Date.now();
-  votes[id] = {
-    topic, title, desc: desc || 'Голосование создано участником.',
-    status: isScheduled ? 'scheduled' : 'active', total: 0,
-    start: fmtDT(startVal), end: fmtDT(endVal),
-    startDate: startDate,
-    endDate,
-    timeLeft: isScheduled ? '—' : calcTimeLeft(endDate),
-    options: questions[0].options,
-    questions: questions.length > 1 ? questions : null,
-    canVote: false, isOwner: true
-  };
-  renderAll();
-  document.querySelectorAll('#page-create .form-input, #page-create .form-textarea').forEach(el => el.value = '');
-  document.querySelectorAll('#page-create .option-input').forEach(el => el.value = '');
-  qCount = 1;
-  const qc = document.getElementById('questions-container');
-  while (qc.children.length > 1) qc.removeChild(qc.lastChild);
-  showPage('home', document.querySelector('.nav-btn'));
+
+  const now = Date.now();
+  const startDate = startVal ? new Date(startVal) : new Date(now + 60_000);
+  const endDate   = endVal   ? new Date(endVal)   : new Date(now + 86400_000);
+
+  if (isNaN(startDate.getTime()) || isNaN(endDate.getTime()))
+    return showToast('Неверный формат даты', 'error');
+  if (endDate <= startDate)
+    return showToast('Дата окончания должна быть позже даты начала', 'error');
+  if (startDate.getTime() < now - 60_000)
+    return showToast('Дата начала не может быть в прошлом', 'error');
+
+  const firstBlock = document.querySelector('#page-create .question-block');
+  const opts = Array.from(firstBlock.querySelectorAll('.option-input'))
+                    .map(i => i.value.trim()).filter(Boolean);
+  if (opts.length < 2) return showToast('Минимум 2 варианта ответа', 'error');
+  if (opts.length > 16) return showToast('Максимум 16 вариантов', 'error');
+
+  const startOffset = Math.max(0, Math.floor((startDate.getTime() - now) / 1000));
+  const duration    = Math.max(60, Math.floor((endDate.getTime() - startDate.getTime()) / 1000));
+
+  const btn = document.querySelector('#page-create .primary-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Создаём…'; }
+  try {
+    await api.createPoll({
+      title,
+      description: desc || ('Тема: ' + topic),
+      options: opts,
+      start_offset_seconds: startOffset,
+      duration_seconds:     duration,
+      creator_wallet:       session.wallet,
+    });
+    showToast('Голосование создано ✓', 'success');
+    document.querySelectorAll('#page-create .form-input, #page-create .form-textarea')
+            .forEach(el => el.value = '');
+    document.querySelectorAll('#page-create .option-input').forEach(el => el.value = '');
+    qCount = 1;
+    const qc = document.getElementById('questions-container');
+    while (qc.children.length > 1) qc.removeChild(qc.lastChild);
+    await refreshAll();
+    showPage('my', document.querySelectorAll('.nav-btn')[3]);
+  } catch (e) {
+    showToast('Ошибка создания: ' + e.message, 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Сохранить голосование'; }
+  }
 }
 
-renderAll();
+/* ─────────────────────────  Boot  ───────────────────────── */
+
+document.getElementById('auth-pk').addEventListener('keypress', (e) => {
+  if (e.key === 'Enter') doLogin();
+});
+
+loadSession();
+if (session && session.wallet) {
+  api.getStudent(session.wallet).then(s => {
+    const eligible = s.eligible || s.whitelisted ||
+                     (Array.isArray(s.poll_whitelisted) && s.poll_whitelisted.length > 0);
+    if (eligible) {
+      session.whitelisted      = !!s.whitelisted;
+      session.poll_whitelisted = Array.isArray(s.poll_whitelisted) ? s.poll_whitelisted : [];
+      saveSession();
+      onLoggedIn();
+    } else {
+      session = null; saveSession(); showAuth();
+    }
+  }).catch(() => { session = null; saveSession(); showAuth(); });
+} else {
+  showAuth();
+}
+
 setInterval(() => {
-  const now = Date.now();
-  Object.values(votes).forEach(v => {
-    if (v.status === 'scheduled' && v.startDate && new Date(v.startDate) <= now) {
-      v.status  = 'active';
-      v.canVote = !v.isOwner;
-      v.timeLeft = calcTimeLeft(v.endDate);
-    }
-    if (v.status === 'active' && v.endDate) {
-      v.timeLeft = calcTimeLeft(v.endDate);
-      if (v.timeLeft === 'Завершено') { v.status = 'ended'; v.canVote = false; }
-    }
+  let changed = false;
+  Object.values(pollsCache).forEach(v => {
+    const ns = pollStatus({
+      start_time: v.startDate.getTime()/1000,
+      end_time:   v.endDate.getTime()/1000,
+      status:     v.status === 'ended' ? 'ended' : null,
+    });
+    if (ns !== v.status) changed = true;
+    v.status = ns;
+    v.timeLeft = ns === 'active' ? calcTimeLeft(v.endDate)
+               : ns === 'scheduled' ? calcTimeUntilStart(v.startDate) : 'Завершено';
   });
   renderAll();
+  if (changed && session) refreshAll();
 }, 30000);
+
+setInterval(() => { if (session) refreshAll(); }, 60000);
+
 </script>
+
 </body>
 </html>

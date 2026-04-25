@@ -21,7 +21,16 @@ class PollCreateWithCreator(PollCreate):
 class VoteRequest(BaseModel):
     poll_address: str
     option_index: int = Field(..., ge=0, le=15)
-    wallet: str = Field(..., description="Voter wallet address")
+    wallet: str = Field(..., description="Voter wallet address (claimed)")
+    signature: str = Field(
+        ...,
+        description="EIP-191 personal_sign of the message field, made with the voter's private key",
+    )
+    message: str = Field(
+        ...,
+        description="Plain-text message that was signed. Must match the canonical voting message.",
+    )
+    nonce: str = Field(..., description="Random nonce embedded in the signed message")
 
 
 class MerkleProofResponse(BaseModel):

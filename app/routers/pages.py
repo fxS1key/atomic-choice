@@ -1,11 +1,16 @@
-from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse
-from fastapi.templating import Jinja2Templates
+"""
+Главная страница — обслуживает static/atomic_choice.html.
+"""
+from pathlib import Path
+
+from fastapi import APIRouter
+from fastapi.responses import FileResponse, HTMLResponse
 
 router = APIRouter(tags=["pages"])
-templates = Jinja2Templates(directory="templates")
+
+INDEX_FILE = Path("static/atomic_choice.html")
 
 
 @router.get("/", response_class=HTMLResponse)
-async def index(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
+async def index():
+    return FileResponse(INDEX_FILE, media_type="text/html")
