@@ -30,3 +30,10 @@ contracts/artifacts/
 
 # App
 deployments.json
+keys.txt
+keys.json
+users.json
+poll_whitelists.json
+server_salt.bin
+session_key.bin
+admin_token.txt

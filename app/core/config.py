@@ -28,6 +28,10 @@ class Settings(BaseSettings):
     ARTIFACTS_DIR: str = "contracts/artifacts"
     DEPLOYMENTS_FILE: str = "deployments.json"
 
+    # Auth
+    ADMIN_TOKEN: Optional[str] = None  # если None — генерируется при старте
+    PUBLIC_URL: Optional[str] = None   # для QR (например, https://xxx.trycloudflare.com)
+
     model_config = {"env_file": ".env", "extra": "ignore"}
 
 

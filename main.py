@@ -18,7 +18,10 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
 from app.core.blockchain import is_connected, load_deployments
-from app.routers import admin, polls, students, pages
+from app.core.admin_auth import initialize_admin_token
+from app.core.auth import initialize_users
+from app.services.user_service import sync_users_to_registry
+from app.routers import admin, polls, students, pages, auth
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
@@ -38,16 +41,23 @@ async def lifespan(app: FastAPI):
     logger.info(" Atomic Choice — starting up")
     logger.info("━" * 60)
 
+    # ── Шаг 0: Admin token ────────────────────────────────────────────────────
+    initialize_admin_token()
+
     # ── Шаг 1: Инициализация keypairs ─────────────────────────────────────────
     from app.core.keys import initialize_keys
     from app.models.student import add_keypair_participant
 
     keypairs = initialize_keys()
-    logger.info("Keys ready: %d keypairs (keys.txt — раздать участникам)", len(keypairs))
+    logger.info("Keys ready: %d keypairs (keys.txt — резерв на случай сбоя регистрации)", len(keypairs))
 
     # Регистрируем всех keypair-участников в реестре студентов
     for kp in keypairs:
         add_keypair_participant(kp["wallet"], kp["private_key"], kp["index"])
+
+    # ── Шаг 1.5: Загрузка зарегистрированных через пароль участников ─────────
+    initialize_users()
+    sync_users_to_registry()
 
     # Восстанавливаем per-poll вайтлисты с диска (poll_whitelists.json)
     from app.services.poll_whitelist_service import load_state as load_poll_whitelists
@@ -142,6 +152,7 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # Routers
 app.include_router(pages.router)
+app.include_router(auth.router)
 app.include_router(polls.router)
 app.include_router(students.router)
 app.include_router(admin.router)

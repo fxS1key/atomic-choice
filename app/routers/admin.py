@@ -1,7 +1,10 @@
 """
-Admin router — deploy, whitelist management, seed data.
+Admin router — deploy, whitelist, регистрации, seed.
+
+Все эндпоинты защищены `X-Admin-Token`.
+Токен пишется в admin_token.txt при старте (или берётся из .env).
 """
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from app.services.deploy_service import deploy_all
 from app.services.whitelist_service import (
     add_student_to_whitelist,
@@ -10,14 +13,19 @@ from app.services.whitelist_service import (
     sync_tree_from_chain,
 )
 from app.services.poll_service import seed_polls, create_poll
+from app.services.user_service import (
+    pending_users, approved_users, approve_user, sync_users_to_registry,
+)
 from app.models.student import get_all, add_student, get_by_wallet
 from app.schemas.poll import AddStudentRequest, PollCreate, PollCreateWithCreator
 from app.core.blockchain import is_connected, load_deployments
 from app.core.keys import get_keypairs
+from app.core.admin_auth import require_admin
+from app.core.config import settings
 import logging
 
 logger = logging.getLogger("atomic-choice.admin")
-router = APIRouter(prefix="/api/admin", tags=["admin"])
+router = APIRouter(prefix="/api/admin", tags=["admin"], dependencies=[Depends(require_admin)])
 
 
 @router.get("/status")
@@ -27,6 +35,8 @@ async def get_status():
     students    = get_all()
     whitelisted = sum(1 for s in students if s.whitelisted)
     keypairs    = get_keypairs()
+    pending     = pending_users()
+    approved    = approved_users()
     return {
         "node_connected":       connected,
         "contracts_deployed":   bool(deployments),
@@ -35,12 +45,15 @@ async def get_status():
         "students_whitelisted": whitelisted,
         "keypairs_generated":   len(keypairs),
         "keys_file":            "keys.txt",
+        "users_pending":        len(pending),
+        "users_approved":       len(approved),
+        "public_url":           settings.PUBLIC_URL,
     }
 
 
 @router.post("/deploy")
 async def deploy_contracts():
-    """Deploy all contracts to local Hardhat node."""
+    """Деплой всех контрактов в локальный Hardhat node."""
     try:
         result = await deploy_all()
         return {"ok": True, "deployments": result}
@@ -52,31 +65,29 @@ async def deploy_contracts():
 @router.post("/setup")
 async def full_setup():
     """
-    One-click setup:
-    1. Deploy contracts
-    2. Add all seed students to whitelist
-    3. Add all keypair participants to whitelist
-    4. Create seed polls
+    Демонстрационный one-click setup:
+    1. Деплой контрактов
+    2. Глобальный whitelist для seed-студентов и keypair-участников
+    3. Тестовые опросы
     """
     try:
         deployments       = await deploy_all()
         whitelist_results = await add_all_students_to_whitelist()
-
-        # Добавляем keypair-участников в вайтлист
-        keypair_results = await _whitelist_all_keypairs()
-
-        poll_results = await seed_polls()
+        keypair_results   = await _whitelist_all_keypairs()
+        poll_results      = await seed_polls()
         return {
-            "ok":            True,
-            "deployments":   deployments,
-            "whitelist":     whitelist_results,
-            "keypairs":      keypair_results,
-            "polls":         poll_results,
+            "ok":          True,
+            "deployments": deployments,
+            "whitelist":   whitelist_results,
+            "keypairs":    keypair_results,
+            "polls":       poll_results,
         }
     except Exception as e:
         logger.error("Setup failed: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
 
+
+# ── Whitelist ────────────────────────────────────────────────────────────────
 
 @router.get("/whitelist")
 async def whitelist_info():
@@ -105,44 +116,56 @@ async def add_all_to_whitelist():
 
 @router.post("/whitelist/keypairs")
 async def whitelist_keypair_participants():
-    """
-    Добавляет всех 10 keypair-участников в глобальный вайтлист.
-    Вызывать после деплоя контрактов.
-    """
+    """Добавляет все keypair-участники в глобальный вайтлист."""
     results = await _whitelist_all_keypairs()
     return {"ok": True, "results": results}
 
 
 @router.get("/keypairs")
 async def list_keypairs():
-    """
-    Возвращает список keypair (без приватных ключей).
-    Приватные ключи — в keys.txt.
-    """
     pairs = get_keypairs()
     return {
-        "count": len(pairs),
+        "count":     len(pairs),
         "keys_file": "keys.txt",
         "participants": [
-            {
-                "index":      p["index"],
-                "wallet":     p["wallet"],
-                "commitment": p["commitment"],
-            }
+            {"index": p["index"], "wallet": p["wallet"], "commitment": p["commitment"]}
             for p in pairs
-        ]
+        ],
     }
 
+
+# ── Registered users ─────────────────────────────────────────────────────────
+
+@router.get("/users/pending")
+async def list_pending_users():
+    return {"users": pending_users()}
+
+
+@router.get("/users/approved")
+async def list_approved_users():
+    return {"users": approved_users()}
+
+
+@router.post("/users/{wallet}/approve")
+async def approve(wallet: str):
+    try:
+        return await approve_user(wallet)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error("approve failed for %s: %s", wallet, e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Manual student registration (legacy) ─────────────────────────────────────
 
 @router.post("/students")
 async def add_student_endpoint(req: AddStudentRequest):
     student = add_student(req.wallet, req.name, req.group)
-    return {
-        "ok":         True,
-        "wallet":     student.wallet,
-        "commitment": hex(student.commitment),
-    }
+    return {"ok": True, "wallet": student.wallet, "commitment": hex(student.commitment)}
 
+
+# ── Polls ────────────────────────────────────────────────────────────────────
 
 @router.post("/polls/seed")
 async def create_seed_polls():
@@ -170,10 +193,11 @@ async def create_poll_endpoint(req: PollCreateWithCreator):
 async def sync_tree():
     """Re-sync Merkle tree from on-chain events."""
     await sync_tree_from_chain()
+    sync_users_to_registry()
     return {"ok": True, "message": "Tree synced"}
 
 
-# ── Internal helpers ──────────────────────────────────────────────────────────
+# ── Internal ─────────────────────────────────────────────────────────────────
 
 async def _whitelist_all_keypairs() -> list[dict]:
     """Добавляет всех keypair-участников в глобальный вайтлист."""

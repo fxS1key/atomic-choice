@@ -2,21 +2,24 @@
 Polls router.
 
 Новые эндпоинты:
+  POST /api/polls
+    — создание опроса авторизованным пользователем (US3)
   POST /api/polls/{address}/whitelist
     — создатель добавляет участника в вайтлист своего голосования
-
   GET /api/polls/{address}/whitelist
     — список участников в вайтлисте голосования
-
   GET /api/polls/{address}/results
     — результаты (только если голосование завершено)
 """
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
-from app.services.poll_service import get_all_polls, get_poll, cast_vote, build_vote_message
+from app.services.poll_service import (
+    get_all_polls, get_poll, cast_vote, build_vote_message, create_poll,
+)
 from app.services.whitelist_service import get_merkle_proof_for_wallet
-from app.schemas.poll import VoteRequest
+from app.schemas.poll import VoteRequest, PollCreate
 from app.core.blockchain import is_connected
+from app.routers.auth import current_user
 import logging
 
 logger = logging.getLogger("atomic-choice.polls_router")
@@ -41,6 +44,48 @@ async def list_polls():
         raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
         logger.error("list_polls error: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/polls")
+async def create_poll_authenticated(req: PollCreate, request: Request):
+    """
+    Создание опроса авторизованным пользователем.
+    Реализует User Story №3: создатель = текущая сессия.
+    Поля валидируются Pydantic'ом (минимум 2 варианта, заголовок ≥3 символа).
+    """
+    user = current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Войдите, чтобы создавать опросы")
+    if not user.get("approved"):
+        raise HTTPException(
+            status_code=403,
+            detail="Только верифицированные участники могут создавать опросы. "
+                   "Дождитесь, пока администратор добавит вас в вайтлист."
+        )
+    if not is_connected():
+        raise HTTPException(status_code=503, detail="Hardhat нода недоступна")
+
+    # Бизнес-валидации поверх Pydantic
+    if any(not o.strip() for o in req.options):
+        raise HTTPException(status_code=400, detail="Все варианты ответа должны быть заполнены")
+    if len(req.options) < 2:
+        raise HTTPException(status_code=400, detail="Минимум два варианта ответа")
+    if req.duration_seconds < 60:
+        raise HTTPException(status_code=400, detail="Длительность не может быть меньше минуты")
+
+    try:
+        result = await create_poll(
+            title=req.title.strip(),
+            description=req.description.strip(),
+            options=[o.strip() for o in req.options],
+            start_offset_seconds=req.start_offset_seconds,
+            duration_seconds=req.duration_seconds,
+            creator_wallet=user["wallet"],
+        )
+        return {"ok": True, **result}
+    except Exception as e:
+        logger.error("create_poll error: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -142,17 +187,51 @@ async def vote_message(poll_address: str, option_index: int, nonce: str):
 
 
 @router.post("/vote")
-async def vote(req: VoteRequest):
+async def vote(req: VoteRequest, request: Request):
+    """
+    Голосование. Два сценария:
+
+    1) Запрос содержит signature/message/nonce → классическая EIP-191 проверка
+       (для скриптов и тестов).
+    2) Только poll_address + option_index → подпись делается сервером от имени
+       текущего залогиненного пользователя. Это основной путь для UI.
+    """
     try:
-        result = await cast_vote(
-            poll_address=req.poll_address,
-            option_index=req.option_index,
-            voter_wallet=req.wallet,
-            signature=req.signature,
-            message=req.message,
-            nonce=req.nonce,
-        )
+        if req.signature and req.message and req.nonce:
+            result = await cast_vote(
+                poll_address=req.poll_address,
+                option_index=req.option_index,
+                voter_wallet=req.wallet,
+                signature=req.signature,
+                message=req.message,
+                nonce=req.nonce,
+            )
+        else:
+            user = current_user(request)
+            if not user:
+                raise HTTPException(status_code=401, detail="Войдите, чтобы голосовать")
+            # Сервер сам подписывает сообщение приватным ключом пользователя.
+            # Этот PK был детерминированно выведен из пароля при регистрации.
+            from eth_account import Account
+            from eth_account.messages import encode_defunct
+            import secrets as _secrets
+            nonce   = _secrets.token_hex(8)
+            message = build_vote_message(req.poll_address, req.option_index, nonce)
+            signed  = Account.sign_message(
+                encode_defunct(text=message),
+                private_key=user["private_key"],
+            )
+            result = await cast_vote(
+                poll_address=req.poll_address,
+                option_index=req.option_index,
+                voter_wallet=user["wallet"],
+                signature=signed.signature.hex(),
+                message=message,
+                nonce=nonce,
+            )
         return result
+    except HTTPException:
+        raise
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except RuntimeError as e:

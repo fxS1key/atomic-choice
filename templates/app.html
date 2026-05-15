@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Atomic Choice</title>
+<link rel="icon" href="/static/logo.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/app.css">
+<script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
+</head>
+<body data-public-url="{{ public_url|default('') }}">
+
+<header>
+  <div class="logo" onclick="nav('home')">
+    <img src="/static/logo.png" alt="Atomic Choice" class="logo-img">
+    ATOMIC CHOICE
+  </div>
+  <nav>
+    <button class="nb on" id="n-home" onclick="nav('home')">Главная</button>
+    <button class="nb" id="n-polls" onclick="nav('polls')">Голосования</button>
+    <button class="nb" id="n-create" onclick="nav('create')">Создать</button>
+    <button class="nb" id="n-how" onclick="window.location.href='/how-it-works'">Как это работает</button>
+    <button class="nb" id="n-admin" onclick="nav('admin')">Админ</button>
+  </nav>
+  <div class="hd-right">
+    <span class="chain-tag" id="chain-tag">Hardhat :8545</span>
+    <button class="wallet-btn" id="wallet-btn" onclick="onWalletClick()">
+      <span class="wdot off" id="wdot"></span>
+      <span id="wallet-label">Войти</span>
+    </button>
+  </div>
+</header>
+
+<main id="root"></main>
+
+<!-- AUTH MODAL -->
+<div id="auth-modal" class="overlay" style="display:none" onclick="if(event.target===this)closeAuthModal()">
+  <div class="modal auth-modal">
+    <div class="modal-title" id="auth-title">🔐 Вход / регистрация</div>
+    <div class="modal-sub">
+      Ваш пароль превращается в приватный ключ Ethereum.<br>
+      Сервер не хранит пароль — только производный ключ.
+    </div>
+    <div class="auth-tabs">
+      <button class="auth-tab on" id="auth-tab-login"    onclick="setAuthMode('login')">Войти</button>
+      <button class="auth-tab"    id="auth-tab-register" onclick="setAuthMode('register')">Зарегистрироваться</button>
+    </div>
+    <form id="auth-form" onsubmit="event.preventDefault(); doAuth();">
+      <input type="text" id="auth-nick" class="auth-input" autocomplete="username"
+        placeholder="Ник (3–32 символа: a-z, 0-9, _ - .)" required>
+      <input type="password" id="auth-pass" class="auth-input" autocomplete="current-password"
+        placeholder="Пароль (минимум 6 символов)" required>
+      <div class="auth-error" id="auth-error"></div>
+      <button type="submit" class="auth-submit" id="auth-submit">Войти</button>
+    </form>
+    <div class="auth-hint">
+      💡 <b>Один и тот же ник + пароль = один и тот же кошелёк</b>.
+      Запомните или запишите пару — её невозможно восстановить.
+    </div>
+    <button class="wl-close" onclick="closeAuthModal()">Отмена</button>
+  </div>
+</div>
+
+<!-- ADMIN TOKEN MODAL -->
+<div id="token-modal" class="overlay" style="display:none" onclick="if(event.target===this)closeTokenModal()">
+  <div class="modal">
+    <div class="modal-title">🔑 Токен администратора</div>
+    <div class="modal-sub">
+      Введите <code>admin_token</code>. Он лежит у вас на ноуте в файле
+      <code>admin_token.txt</code>.
+    </div>
+    <input type="password" id="token-input" class="auth-input" placeholder="X-Admin-Token">
+    <button class="auth-submit" onclick="submitToken()">Войти как админ</button>
+    <button class="wl-close" onclick="closeTokenModal()">Отмена</button>
+  </div>
+</div>
+
+<div id="toasts"></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

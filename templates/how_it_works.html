@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Atomic Choice — как это работает</title>
+<link rel="icon" href="/static/logo.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+
+<header>
+  <div class="logo" onclick="location.href='/'">
+    <img src="/static/logo.png" alt="" class="logo-img">
+    ATOMIC CHOICE
+  </div>
+  <nav>
+    <button class="nb" onclick="location.href='/'">← На главную</button>
+  </nav>
+</header>
+
+<div class="hiw-wrap">
+  <a class="hiw-back" href="/">← Назад в приложение</a>
+  <div class="hiw-title">Как ваш пароль превращается в анонимный голос</div>
+  <div class="hiw-sub">Криптографический путь данных от формы регистрации до записи в блокчейне.</div>
+
+  <div class="hiw-step">
+    <h3><span class="num">1</span> Регистрация: ник + пароль</h3>
+    <p>
+      Вы вводите никнейм и пароль. Никнейм — публичен; пароль никогда не покидает
+      ваш браузер в открытом виде. Сервер вычисляет приватный ключ детерминированно:
+    </p>
+    <p><code>seed = scrypt(password, salt = server_salt || nick.lower(), N=2¹⁴)</code><br>
+       <code>private_key = seed[:32]</code></p>
+    <p>
+      Это значит, что <b>один и тот же ник + пароль всегда дают один и тот же кошелёк</b>.
+      Никакой базы паролей не существует — её невозможно «слить».
+    </p>
+  </div>
+
+  <div class="hiw-arrow">▼</div>
+
+  <div class="hiw-step">
+    <h3><span class="num">2</span> ZK-идентичность</h3>
+    <p>
+      Из приватного ключа выводится ZK-секрет и публичное «обязательство»:
+    </p>
+    <p><code>secret = sha256(private_key) mod p</code><br>
+       <code>commitment = Poseidon(secret)</code></p>
+    <p>
+      <code>commitment</code> попадает в публичный список (whitelist), а сам <code>secret</code>
+      остаётся внутри. Вы можете доказать «я знаю секрет, дающий это обязательство»,
+      не раскрывая, какой именно вы — это и есть <i>zero-knowledge proof</i>.
+    </p>
+  </div>
+
+  <div class="hiw-arrow">▼</div>
+
+  <div class="hiw-step">
+    <h3><span class="num">3</span> Whitelist в смарт-контракте</h3>
+    <p>
+      Администратор НИЯУ МИФИ одобряет регистрацию. Ваше <code>commitment</code>
+      добавляется в on-chain Merkle-дерево (контракт <code>Whitelist.sol</code>).
+      В блокчейне видно только обязательство, не привязанное к нику.
+    </p>
+    <div class="kvs">
+      <div><span class="k">root  =</span> <span class="v">Poseidon(... все commitment ...)</span></div>
+      <div><span class="k">depth =</span> <span class="v">10 (до 1024 участников)</span></div>
+    </div>
+  </div>
+
+  <div class="hiw-arrow">▼</div>
+
+  <div class="hiw-step">
+    <h3><span class="num">4</span> Голосование с Merkle inclusion proof</h3>
+    <p>
+      Вы выбираете вариант. Браузер запрашивает у API <code>Merkle proof</code>:
+      путь от вашего листа до корня дерева. Это доказывает, что вы — один из
+      участников whitelist'а, не раскрывая, кто именно.
+    </p>
+    <p>
+      Параллельно вычисляется <b>nullifier</b> — уникальный «штамп голоса»:
+    </p>
+    <p><code>nullifier = Poseidon(secret, poll_id)</code></p>
+    <p>
+      Контракт хранит таблицу использованных <code>nullifier</code>. Второй голос
+      от того же пользователя в том же опросе даст тот же <code>nullifier</code>
+      и будет отклонён — но связать его с вашим ником невозможно.
+    </p>
+  </div>
+
+  <div class="hiw-arrow">▼</div>
+
+  <div class="hiw-step">
+    <h3><span class="num">5</span> Отправка транзакции через ретранслятор</h3>
+    <p>
+      Чтобы скрыть, кто отправил голос, транзакция уходит на блокчейн от имени
+      сервиса (Atomic Choice relay), а не от вашего адреса. В блокчейне видно:
+    </p>
+    <ul style="font-family:'IBM Plex Mono', monospace;font-size:.78rem;color:var(--text2);padding-left:1.2rem;line-height:1.6">
+      <li>факт голоса (увеличение счётчика варианта),</li>
+      <li>nullifier (не привязан к нику),</li>
+      <li>Merkle root, подтверждающий принадлежность к whitelist.</li>
+    </ul>
+    <p style="margin-top:.5rem">
+      <b>Что НЕ видно:</b> ваш ник, ваш кошелёк, какой именно вы выбрали вариант,
+      пока голосование активно (результаты разблокируются по таймауту).
+    </p>
+  </div>
+
+  <div class="hiw-arrow">▼</div>
+
+  <div class="hiw-step">
+    <h3><span class="num">6</span> Публикация результатов</h3>
+    <p>
+      Пока <code>now &lt; endTime</code>, контракт возвращает нули — это исключает
+      «бандвагон-эффект» и слежение за динамикой. После окончания результаты
+      становятся публичными и неоспоримыми, так как все голоса уже в блокчейне.
+    </p>
+  </div>
+
+  <div class="hiw-step" style="border-left-color:var(--green);background:rgba(52,211,153,.05)">
+    <h3><span class="num" style="background:var(--green)">✓</span> Гарантии</h3>
+    <p>
+      <b>Один пользователь — один голос:</b> nullifier.<br>
+      <b>Только МИФИ:</b> whitelist, контролируемый администратором.<br>
+      <b>Анонимность:</b> ZK-proof + relay-транзакции.<br>
+      <b>Прозрачность:</b> все голоса в публичном блокчейне.<br>
+      <b>Независимость:</b> работает в локальной сети без внешних сервисов.
+    </p>
+  </div>
+
+  <div style="margin-top:2rem;text-align:center">
+    <a href="/" class="vsub" style="display:inline-block;width:auto;padding:.7rem 2rem;text-decoration:none">
+      Вернуться в приложение
+    </a>
+  </div>
+</div>
+
+</body>
+</html>

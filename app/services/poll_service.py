@@ -261,7 +261,7 @@ async def cast_vote(
     nullifier = nullifier_of(student.secret, poll_id)
 
     if poll_contract.functions.nullifierUsed(nullifier).call():
-        raise ValueError("Вы уже проголосовали в этом голосовании (nullifier использован)")
+        raise ValueError("Вы уже участвовали в этом голосовании.")
 
     # Получаем Merkle proof: сначала per-poll, потом глобальный
     try:
