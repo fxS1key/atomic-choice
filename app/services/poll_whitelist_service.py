@@ -228,6 +228,100 @@ async def add_wallet_to_poll_whitelist(
     }
 
 
+async def sync_poll_root(
+    poll_address: str,
+    requester_wallet: Optional[str] = None,
+) -> dict:
+    """
+    Принудительно синхронизирует текущий off-chain корень дерева
+    per-poll вайтлиста с контрактом голосования (validRoots[currentRoot] = true).
+
+    Используется когда:
+      - корень дерева в контракте устарел (например, после рестарта сервера
+        контракт не помнит ранее добавленные корни);
+      - пользователь получает ошибку «Merkle root не принят контрактом».
+
+    Право вызова — только создатель голосования.
+    Если requester_wallet=None — пропускаем проверку (вызов из админки).
+
+    Возвращает информацию о пушнутом корне.
+    """
+    poll_addr_lower = poll_address.lower()
+
+    # ── Проверка прав ──────────────────────────────────────────────────────────
+    creator = _poll_creators.get(poll_addr_lower)
+    if requester_wallet is not None:
+        if creator is None:
+            raise PermissionError(
+                "Голосование не зарегистрировано как пользовательское — "
+                "обновить корень может только администратор."
+            )
+        if requester_wallet.lower() != creator:
+            raise PermissionError(
+                "Только создатель голосования может обновлять вайтлист."
+            )
+
+    tree = _poll_trees.get(poll_addr_lower)
+    if not tree or not tree.leaves:
+        # Дерево пустое — используем глобальный корень
+        from app.core.merkle import get_tree
+        global_tree = get_tree()
+        if not global_tree.leaves:
+            raise ValueError(
+                "Дерево вайтлиста пустое: ни в этом голосовании, ни в глобальном "
+                "нет участников. Сначала добавьте хотя бы одного."
+            )
+        new_root = global_tree.root()
+        source   = "global"
+        size     = len(global_tree.leaves)
+    else:
+        new_root = tree.root()
+        source   = "poll"
+        size     = len(tree.leaves)
+
+    # ── Проверим — может корень уже принят контрактом ──────────────────────────
+    poll_contract = get_poll_contract(poll_address)
+    if poll_contract.functions.validRoots(new_root).call():
+        return {
+            "ok":         True,
+            "already":    True,
+            "poll":       poll_address,
+            "root":       str(new_root),
+            "tree_size":  size,
+            "source":     source,
+            "message":    "Корень уже принят контрактом — обновление не требуется.",
+        }
+
+    # ── Обновляем корень в контракте VotingPoll ───────────────────────────────
+    account = get_deployer_account()
+    fn = poll_contract.functions.addWhitelistRoot(new_root)
+    receipt = send_tx(fn, account.address, settings.DEPLOYER_PRIVATE_KEY)
+
+    if receipt["status"] != 1:
+        raise RuntimeError("addWhitelistRoot транзакция reverted")
+
+    logger.info(
+        "✓ Synced root for poll %s | root=%s | tree_size=%d | source=%s",
+        poll_address[:10] + "…",
+        hex(new_root)[:14] + "…",
+        size,
+        source,
+    )
+
+    return {
+        "ok":         True,
+        "already":    False,
+        "poll":       poll_address,
+        "root":       str(new_root),
+        "tree_size":  size,
+        "source":     source,
+        "tx_hash":    receipt["transactionHash"].hex(),
+        "block":      receipt["blockNumber"],
+        "gas_used":   receipt["gasUsed"],
+        "message":    "Корень обновлён в контракте — теперь голосование примет голоса.",
+    }
+
+
 def get_poll_merkle_proof(poll_address: str, voter_wallet: str) -> dict:
     """
     Возвращает Merkle proof участника из per-poll дерева.

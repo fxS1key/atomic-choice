@@ -86,9 +86,12 @@ function nav(p, addr) {
   page = p;
   pollAddr = addr || null;
   selOpt = null;
-  ['home', 'polls', 'create', 'admin'].forEach(x =>
-    $('n-' + x)?.classList.toggle('on', x === p || (p === 'poll' && x === 'polls'))
-  );
+  ['home', 'polls', 'create', 'admin'].forEach(x => {
+    const el = $('n-' + x); if (!el) return;
+    const isOn = x === p || (p === 'poll' && x === 'polls');
+    el.classList.toggle('on', isOn);
+    el.classList.toggle('active', isOn);
+  });
   render();
   window.scrollTo(0, 0);
 }
@@ -154,11 +157,11 @@ async function doAuth() {
 function updateWalletUI() {
   const dot = $('wdot'), lbl = $('wallet-label'), btn = $('wallet-btn');
   if (me) {
-    dot.className = 'wdot on';
+    dot.className = 'wdot user-dot on';
     lbl.textContent = me.nick + (me.approved ? '' : ' ⏳');
     btn.classList.add('active');
   } else {
-    dot.className = 'wdot off';
+    dot.className = 'wdot user-dot off';
     lbl.textContent = 'Войти';
     btn.classList.remove('active');
   }
@@ -340,7 +343,7 @@ async function renderPoll() {
       <div>
         <div class="card" style="margin-bottom:1rem">
           <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:.5rem;margin-bottom:.7rem">
-            <div style="font-size:.67rem;color:var(--text3);letter-spacing:.08em;text-transform:uppercase;font-family:var(--mono)">#${poll.poll_id}</div>
+            <div class="vote-topic" style="margin:0">#${poll.poll_id}</div>
             ${badge(poll.status)}
           </div>
           <div class="pd-title">${esc(poll.title)}</div>
@@ -381,9 +384,14 @@ async function renderPoll() {
 
       <div>
         <div class="card" id="vpanel">${renderVotePanel(poll, options)}</div>
+        ${isCurrentUserCreator(poll) ? `
+        <div class="card" id="wlpanel" style="margin-top:1rem">${renderPollWhitelistPanel(poll)}</div>` : ''}
       </div>
     </div>
   </div>`;
+
+  // Populate whitelist panel (if mounted) — does its own fetch
+  if ($('wlpanel')) loadPollWhitelistMembers(poll.address);
 }
 
 function renderVotePanel(poll, options) {
@@ -428,6 +436,9 @@ window.selectOpt = selectOpt;
 
 async function doVote(addr) {
   if (selOpt === null || !me) return;
+  // doVote._retried is cleared once per fresh user action (a new poll render
+  // resets it implicitly because the user must re-click ПРОГОЛОСОВАТЬ).
+  if (typeof doVote._retried === 'undefined') doVote._retried = false;
   const panel = $('vpanel');
   const steps = [
     'derive private key from your password',
@@ -462,11 +473,12 @@ async function doVote(addr) {
   });
 
   if (res.ok || res.tx_hash) {
+    doVote._retried = false;
     panel.innerHTML = `
       <div class="success-box">
         <div class="sb-icon">✓</div>
         <div class="sb-title">ГОЛОС ЗАСЧИТАН</div>
-        <div style="font-size:.82rem;color:var(--text2);margin-top:.3rem">${esc(res.message || '')}</div>
+        <div style="font-size:.82rem;color:var(--muted);margin-top:.3rem">${esc(res.message || '')}</div>
         <div class="sb-hash">
           tx: ${esc(res.tx_hash || '')}<br>
           nullifier: ${esc(res.nullifier || '')}<br>
@@ -475,15 +487,146 @@ async function doVote(addr) {
       </div>`;
     toast('✓ Голос записан в блокчейн!', 'ok');
     setTimeout(() => renderPoll(), 2200);
-  } else {
-    panel.innerHTML = `
-      <div class="vp-title">⚠ ОШИБКА</div>
-      <div class="ib err">${esc(res.detail || res.error || 'Неизвестная ошибка')}</div>
-      <button class="vsub" onclick="renderPoll()">ПОПРОБОВАТЬ СНОВА</button>`;
-    toast(res.detail || res.error, 'err');
+    return;
   }
+
+  // ── Failure path ───────────────────────────────────────────────────────
+  const msg = res.detail || res.error || 'Неизвестная ошибка';
+  const looksLikeRoot = /Merkle\s*root/i.test(msg);
+
+  // If the current user is the poll's creator and the failure looks like a
+  // stale root, try to update the on-chain root ourselves and re-vote once.
+  if (looksLikeRoot && !doVote._retried) {
+    const pollNow = await api('GET', `/api/polls/${addr}`);
+    if (isCurrentUserCreator(pollNow)) {
+      doVote._retried = true;
+      toast('Корень вайтлиста не принят — пытаюсь обновить…', 'info');
+      const sync = await syncPollRoot(addr, /*silent=*/true);
+      if (sync && (sync.ok || sync.already)) {
+        toast('✓ Корень обновлён, повторяю голос', 'ok');
+        return doVote(addr);
+      }
+    }
+  }
+  doVote._retried = false;
+
+  // Refetch poll so we know whether to show the manual sync button
+  const pollForUi = await api('GET', `/api/polls/${addr}`);
+  const canSync = looksLikeRoot && isCurrentUserCreator(pollForUi);
+
+  panel.innerHTML = `
+    <div class="vp-title">⚠ ОШИБКА</div>
+    <div class="ib err">${esc(msg)}</div>
+    ${canSync ? `
+      <button class="vsub" style="margin-top:.6rem;background:var(--surface);color:var(--accent);border:1px solid var(--accent)"
+        onclick="syncPollRoot('${addr}').then(()=>renderPoll())">↻ Обновить корень вайтлиста</button>` : ''}
+    <button class="vsub" style="margin-top:.5rem" onclick="renderPoll()">ПОПРОБОВАТЬ СНОВА</button>`;
+  toast(msg, 'err');
 }
 const delay = ms => new Promise(r => setTimeout(r, ms));
+
+/* ── Per-poll whitelist (creator-only panel) ──────────────────────────────
+ *
+ *   poll.creator приходит с бэка в EIP-55. Сравниваем через toLowerCase, чтобы
+ *   избежать промахов из-за регистра. Бэкенд хранит creator => poll mapping
+ *   в poll_whitelists.json (см. app/services/poll_whitelist_service.py).
+ */
+function isCurrentUserCreator(poll) {
+  if (!me || !me.wallet || !poll || !poll.creator) return false;
+  return me.wallet.toLowerCase() === String(poll.creator).toLowerCase();
+}
+
+function renderPollWhitelistPanel(poll) {
+  return `
+    <div class="vp-title">🔧 ВАЙТЛИСТ ГОЛОСОВАНИЯ</div>
+    <div class="subtle-note" style="margin-bottom:.6rem">
+      Только вы — как создатель — видите эту панель.
+    </div>
+    <div id="wl-members" class="subtle-note">Загрузка участников…</div>
+    <div class="form-group" style="margin-top:.9rem">
+      <label class="form-label">Добавить кошелёк</label>
+      <div class="option-row">
+        <input id="wl-add" class="form-input" placeholder="0x…" autocomplete="off">
+        <button class="primary-btn" type="button"
+          onclick="addPollWhitelistMember('${poll.address}')">+ Добавить</button>
+      </div>
+    </div>
+    <button class="primary-btn" id="wl-sync" type="button"
+      style="width:100%;margin-top:.2rem"
+      onclick="syncPollRoot('${poll.address}')">↻ Обновить корень вайтлиста</button>
+    <div class="subtle-note" id="wl-status" style="margin-top:.5rem;font-family:var(--mono);font-size:11px"></div>`;
+}
+
+async function loadPollWhitelistMembers(addr) {
+  const r = await api('GET', `/api/polls/${addr}/whitelist`);
+  const box = $('wl-members');
+  if (!box) return;
+  if (!r._ok) {
+    box.textContent = r.detail || r.error || 'Не удалось загрузить список';
+    return;
+  }
+  const list = r.members || [];
+  // members[] coming back may be either plain wallet strings (current backend)
+  // or richer { wallet, … } objects in the future — tolerate both.
+  const rows = list.map(m => {
+    const w = (m && (m.wallet || m)) || '';
+    const short = w ? w.slice(0, 10) + '…' + w.slice(-6) : '(пусто)';
+    return `<div class="sr"><div class="sdot"></div>
+      <div style="font-family:var(--mono);font-size:11.5px;word-break:break-all">${esc(short)}</div>
+    </div>`;
+  }).join('');
+  box.innerHTML = `
+    <div style="margin-bottom:.3rem">Всего участников: <b>${list.length}</b></div>
+    ${list.length ? rows : '<div class="subtle-note">Пусто. Добавьте кошельки ниже.</div>'}`;
+
+  const status = $('wl-status');
+  if (status && r.tree_root) {
+    const shortRoot = String(r.tree_root).slice(0, 12) + '…';
+    status.textContent = `root: ${shortRoot} · size: ${list.length}`;
+  }
+}
+
+async function addPollWhitelistMember(addr) {
+  const input = $('wl-add');
+  const v = (input?.value || '').trim();
+  if (!/^0x[0-9a-fA-F]{40}$/.test(v)) {
+    toast('Введите корректный 0x-адрес (40 hex)', 'err');
+    return;
+  }
+  const r = await api('POST', `/api/polls/${addr}/whitelist`, { voter_wallet: v });
+  if (!r._ok) {
+    toast(r.detail || r.error || 'Не удалось добавить', 'err');
+    return;
+  }
+  if (input) input.value = '';
+  toast('✓ Добавлен. Корень обновлён автоматически.', 'ok');
+  loadPollWhitelistMembers(addr);
+}
+
+async function syncPollRoot(addr, silent) {
+  const btn = $('wl-sync');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Обновляю…'; }
+  const r = await api('POST', `/api/polls/${addr}/whitelist/sync`);
+  if (btn) { btn.disabled = false; btn.textContent = '↻ Обновить корень вайтлиста'; }
+
+  if (r._ok && (r.ok || r.already)) {
+    if (!silent) {
+      toast(r.already ? 'Корень уже актуален' : '✓ Корень обновлён в контракте', 'ok');
+    }
+    const status = $('wl-status');
+    if (status) {
+      const shortRoot = String(r.root || '').slice(0, 12) + '…';
+      status.textContent = `root: ${shortRoot} · size: ${r.tree_size ?? '?'} · ${r.source || ''}`;
+    }
+    return r;
+  }
+  if (!silent) toast(r.detail || r.error || 'Не удалось обновить корень', 'err');
+  return r;
+}
+
+window.addPollWhitelistMember = addPollWhitelistMember;
+window.syncPollRoot           = syncPollRoot;
+
 
 /* ── CREATE POLL ──────────────────────────────────────────────────────────── */
 function renderCreate() {

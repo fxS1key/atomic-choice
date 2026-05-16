@@ -28,7 +28,7 @@ router = APIRouter(prefix="/api", tags=["polls"])
 
 class PollWhitelistRequest(BaseModel):
     voter_wallet: str
-    requester_wallet: str  # должен совпадать с создателем голосования
+    requester_wallet: str | None = None  # если не задан — берём из cookie-сессии
 
 
 # ── Polls list ────────────────────────────────────────────────────────────────
@@ -151,20 +151,57 @@ async def get_poll_whitelist(address: str):
     }
 
 
+class PollSyncRequest(BaseModel):
+    requester_wallet: str | None = None
+
+
+@router.post("/polls/{address}/whitelist/sync")
+async def sync_poll_whitelist(address: str, request: Request):
+    """
+    Создатель голосования принудительно публикует текущий off-chain
+    корень своего per-poll вайтлиста в контракт. Решает ошибку
+    «Merkle root не принят контрактом».
+
+    Право вызова — текущий залогиненный пользователь должен быть создателем
+    голосования (per-poll registry).
+    """
+    user = current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Войдите, чтобы обновить вайтлист")
+    from app.services.poll_whitelist_service import sync_poll_root
+    try:
+        result = await sync_poll_root(address, requester_wallet=user["wallet"])
+        return result
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/polls/{address}/whitelist")
-async def add_to_poll_whitelist(address: str, req: PollWhitelistRequest):
+async def add_to_poll_whitelist(
+    address: str, req: PollWhitelistRequest, request: Request
+):
     """
     Создатель голосования добавляет участника в вайтлист своего голосования.
 
     requester_wallet должен совпадать с кошельком создателя.
-    В demo-режиме проверяется только сравнение строк (без крипто-подписи).
+    Если поле опущено — берём кошелёк из текущей сессии.
     """
+    requester = req.requester_wallet
+    if not requester:
+        user = current_user(request)
+        if not user:
+            raise HTTPException(status_code=401, detail="Войдите, чтобы управлять вайтлистом")
+        requester = user["wallet"]
     from app.services.poll_whitelist_service import add_wallet_to_poll_whitelist
     try:
         result = await add_wallet_to_poll_whitelist(
             poll_address=address,
             voter_wallet=req.voter_wallet,
-            requester_wallet=req.requester_wallet,
+            requester_wallet=requester,
         )
         return result
     except PermissionError as e:

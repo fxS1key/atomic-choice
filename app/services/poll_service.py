@@ -278,12 +278,40 @@ async def cast_vote(
         from app.core.blockchain import get_whitelist_contract
         wl = get_whitelist_contract()
         current_root = wl.functions.root().call()
-        if not poll_contract.functions.validRoots(current_root).call():
-            raise ValueError(
-                "Merkle root не принят контрактом. "
-                "Создатель голосования должен обновить корень вайтлиста."
-            )
-        merkle_root = current_root
+        if poll_contract.functions.validRoots(current_root).call():
+            # Глобальный корень уже зарегистрирован → используем его
+            merkle_root = current_root
+        else:
+            # Пытаемся самостоятельно синхронизировать корень с контрактом —
+            # это убирает «висячую» ошибку Merkle root не принят, когда сервер
+            # перезапускался или контракт был передеплоен.
+            try:
+                from app.services.poll_whitelist_service import sync_poll_root
+                await sync_poll_root(poll_address)  # без проверки права (внутренний вызов)
+            except Exception as sync_err:
+                logger.warning(
+                    "Auto-sync of merkle root failed for poll %s: %s",
+                    poll_address[:10] + "…", sync_err,
+                )
+                raise ValueError(
+                    "Merkle root не принят контрактом. "
+                    "Создатель голосования должен обновить корень вайтлиста: "
+                    f"{sync_err}"
+                )
+            # После синка пересчитываем proof — корень мог сдвинуться
+            try:
+                from app.services.poll_whitelist_service import get_poll_merkle_proof
+                proof_data  = get_poll_merkle_proof(poll_address, voter_wallet)
+                merkle_root = int(proof_data["root"])
+            except ValueError:
+                proof_data  = get_merkle_proof_for_wallet(voter_wallet)
+                merkle_root = int(proof_data["root"])
+            if not poll_contract.functions.validRoots(merkle_root).call():
+                raise ValueError(
+                    "Merkle root всё ещё не принят контрактом даже после "
+                    "автоматического обновления. Создатель должен вручную "
+                    "вызвать «Обновить вайтлист»."
+                )
 
     zk = make_stub_proof(nullifier, merkle_root, option_index, poll_id)
 
